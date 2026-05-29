@@ -2144,6 +2144,294 @@ function hexToRgb (hex) {
     return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
 }
 
+// ============================================================
+// i18n — English ↔ Chinese
+// English source text IS the lookup key. STRINGS.zh maps it to Chinese.
+// Missing keys fall back to English. t(s, vars) handles {placeholder}
+// interpolation so the same site works for both languages.
+// ============================================================
+
+let currentLang = 'en';
+try {
+    const saved = localStorage.getItem('swirl-lang');
+    if (saved === 'en' || saved === 'zh') currentLang = saved;
+    else if ((navigator.language || '').toLowerCase().startsWith('zh')) currentLang = 'zh';
+} catch (_) {}
+
+const STRINGS = {
+    en: {
+        // Semantic keys (not natural English) need an explicit en value
+        // because t() falls back to the key itself when no translation exists.
+        'device.foot': 'Don\'t see your app? Install a virtual audio cable<br>(<a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">VB-Cable</a> on Windows, <a href="https://github.com/ExistentialAudio/BlackHole" target="_blank" rel="noopener">BlackHole</a> on macOS) and route the app to it.',
+    },
+    zh: {
+        // ── Tab labels / toggles ────────────────────────────────
+        'Settings': '设置',
+        'present': '展示',
+        'OFF': '关',
+        'Default': '默认',
+        'Smoke': '烟雾',
+        'Ink': '墨色',
+        'Rainbow': '彩虹',
+        'Aqua': '水母',
+        'Blink': '涟漪',
+        'None': '无',
+        'Frost': '磨砂',
+        'Dream': '梦境',
+        'Grain': '颗粒',
+        'Vignette': '暗角',
+        'Halftone': '半调',
+        'Reeded': '凹槽',
+        'Ripple': '波纹',
+        'Pebbled': '鹅卵石',
+        'Diamond': '菱形',
+        'Molten': '熔融',
+
+        // ── Source picker / overlay ─────────────────────────────
+        'Audio-reactive fluid simulation. Enable your microphone to begin.':
+            '音频驱动的流体模拟。开启麦克风即可开始。',
+        'Microphone': '麦克风',
+        'Use the default system microphone': '使用默认系统麦克风',
+        'Browser tab / system audio': '浏览器标签 / 系统音频',
+        'Pick a tab or share your screen with audio': '选择一个标签页或共享带音频的屏幕',
+        'Audio file': '音频文件',
+        'MP3, WAV, OGG — plays on loop': 'MP3, WAV, OGG — 循环播放',
+        'Choose audio input': '选择音频输入',
+        '[← ] Back': '[← ] 返回',
+        'device.foot': '看不到您的应用?安装虚拟音频线<br>(Windows 使用 <a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">VB-Cable</a>,macOS 使用 <a href="https://github.com/ExistentialAudio/BlackHole" target="_blank" rel="noopener">BlackHole</a>)然后将应用路由到它。',
+
+        // ── Status / hint messages ──────────────────────────────
+        'Not supported in this browser — try Chrome or Edge': '此浏览器不支持 — 请试用 Chrome 或 Edge',
+        'Loading devices…': '加载设备中…',
+        'Microphone permission denied — needed to list devices.': '麦克风权限被拒绝 — 列出设备需要权限。',
+        'Could not list audio devices.': '无法列出音频设备。',
+        'No audio inputs found.': '未找到音频输入设备。',
+        'Source ended ({kind}). Pick another one.': '音频源已结束({kind})。请选择其他源。',
+        'Requesting…': '请求中…',
+        'This browser does not support tab / system audio capture.': '此浏览器不支持标签 / 系统音频捕获。',
+        'No audio captured. Check "Share audio" when picking the source.': '未捕获到音频。选择源时请勾选"共享音频"。',
+        'Permission denied. Allow access in your browser and try again.': '权限被拒绝。请在浏览器中允许访问后重试。',
+        'That device is no longer available. Pick another.': '此设备不再可用。请选择其他设备。',
+        'Failed to start source. See console for details.': '源启动失败。详情请查看控制台。',
+        "Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed.":
+            '麦克风未启动。点击"麦克风"重试,或检查站点是否为 HTTPS 且已允许麦克风访问。',
+
+        // ── Panel sections + labels ─────────────────────────────
+        'Simulation': '模拟',
+        'Effects': '视觉效果',
+        'Palette': '调色板',
+        'Filter': '滤镜',
+        'Glass displacement': '玻璃位移',
+        'Audio → Fluid': '音频 → 流体',
+        'Onset / Beat': '起音 / 节拍',
+        'Playback': '控制',
+
+        'Sim resolution': '模拟分辨率',
+        'Dye resolution': '颜料分辨率',
+        'Density diffusion': '密度扩散',
+        'Velocity diffusion': '速度扩散',
+        'Pressure': '压力',
+        'Vorticity (curl)': '涡度 (旋转)',
+        'Splat radius': '喷溅半径',
+
+        'Shading': '着色',
+        'Bloom': '泛光',
+        'Bloom intensity': '泛光强度',
+        'Bloom threshold': '泛光阈值',
+        'Sunrays': '光线',
+        'Sunrays weight': '光线强度',
+        'Background': '背景色',
+
+        'Mode': '模式',
+        'Base hue': '基础色相',
+        'Hue range': '色相范围',
+        'FULL': '全彩',
+        'SINGLE': '单色',
+        'MONO': '黑白',
+
+        'NONE': '无',
+        'FROST': '磨砂',
+        'DREAM': '梦境',
+        'GRAIN': '颗粒',
+        'VIGNETTE': '暗角',
+        'HALFTONE': '半调',
+        'REEDED': '凹槽',
+        'RIPPLE': '波纹',
+        'PEBBLED': '鹅卵石',
+        'DIAMOND': '菱形',
+        'MOLTEN': '熔融',
+        'Filter intensity': '滤镜强度',
+
+        'Frequency X': '频率 X',
+        'Frequency Y': '频率 Y',
+        'Octaves': '噪声层数',
+        'Seed': '随机种子',
+        'Glass blur': '玻璃模糊',
+
+        'Trajectory': '轨迹',
+        'RANDOM': '随机',
+        'LISSAJOUS': '利萨如',
+        'ORBIT': '轨道',
+        'SINE_WAVE': '正弦波',
+        'AQUA': '水母',
+        'BLINK': '涟漪',
+        'Band threshold': '频段阈值',
+        'Splat force': '喷溅力度',
+        'Volume gain': '音量增益',
+        'Color gain': '颜色增益',
+        'Color knee': '颜色弯曲点',
+        'Volume compress': '音量压缩',
+        'Energy curve': '能量曲线',
+        'Anchor wobble': '锚点抖动',
+
+        'Sensitivity': '灵敏度',
+        'Cooldown (ms)': '冷却 (ms)',
+        'Burst base': '爆发基础',
+        'Burst gain': '爆发增益',
+
+        'Paused': '暂停',
+        'Random splats': '随机喷溅',
+        'Reset preset': '重置预设',
+        'Save as default': '保存为默认',
+        'Reset to factory': '恢复出厂',
+        'Copy settings as JSON': '复制设置为 JSON',
+        'Saved ✓': '已保存 ✓',
+        'Copied ✓': '已复制 ✓',
+        'See console': '查看控制台',
+
+        // ── Tooltips ────────────────────────────────────────────
+        'Grid resolution of the velocity-field simulation. Higher = finer motion detail, more GPU cost. Changing rebuilds framebuffers.':
+            '速度场模拟的网格分辨率。越高 = 运动细节越精细,GPU 开销越大。改动会重建帧缓冲。',
+        'Resolution of the color (dye) texture. Higher = crisper colors, more VRAM. Changing rebuilds framebuffers.':
+            '颜料(染料)纹理的分辨率。越高 = 颜色越锐利,显存占用越大。改动会重建帧缓冲。',
+        'How quickly the color fades. 0 = colors stay forever, 4 = vanish almost instantly. Raise if the screen gets too saturated.':
+            '颜色消散的速度。0 = 颜色永久保留,4 = 几乎瞬间消失。如果画面过饱和,调高此值。',
+        'How quickly motion slows down. Higher = fluid quickly comes to rest, lower = momentum keeps swirling for ages.':
+            '运动衰减的速度。越高 = 流体快速静止,越低 = 动量持续旋转许久。',
+        'Strength of pressure projection — how strictly the fluid stays incompressible. Lower = soft puffy smoke, higher = liquid-like.':
+            '压力投影的强度 — 流体保持不可压缩的严格程度。越低 = 蓬松烟雾感,越高 = 液体感。',
+        'How much swirling is amplified. 0 = no eddies, 30+ = strong vortices. The signature "swirl" knob.':
+            '旋转涡度的放大倍数。0 = 无涡流,30+ = 强烈漩涡。"漩涡"的核心调节。',
+        'Size of each color injection. Small = pinpoint dots, large = broad smears.':
+            '每次颜色注入的大小。小 = 精准点,大 = 宽阔涂抹。',
+
+        'Adds fake lighting based on color gradients — makes the fluid look 3D. Off = flat, off-trippy.':
+            '基于颜色梯度添加伪光照 — 使流体看起来立体。关闭 = 扁平。',
+        'Glow halo around bright areas. Major visual punch but the main cause of whiteout on loud audio. Turn off if too blown out.':
+            '明亮区域周围的光晕。视觉冲击力强但大音量下容易过曝。如果太亮可以关掉。',
+        'Strength of the bloom glow. Lower if loud passages turn the screen white.':
+            '泛光强度。如果大音量时画面变白,调低此值。',
+        'Brightness above which bloom kicks in. Raise (toward 1) so only very bright spots glow.':
+            '触发泛光的亮度阈值。调高(接近 1)则仅最亮的点会发光。',
+        'God rays / volumetric light streaming from bright spots. Adds drama, also tends to whiteout on loud audio.':
+            '从亮点散射的体积光线 / 神光。增加戏剧感,但大音量时容易过曝。',
+        'Strength of the god rays.': '神光强度。',
+        'Canvas background color. Tip: pure black (#000000) makes additive colors pop the most.':
+            '画面背景色。提示:纯黑 (#000000) 让叠加颜色最鲜明。',
+
+        'How splat colors are picked. FULL = each band uses its anchor hue, splats span the rainbow. SINGLE = every splat picks a hue around Base hue with ±Hue range jitter. MONO = saturation forced to 0, only brightness varies — black/white/grey.':
+            '喷溅颜色的选择方式。全彩 = 每个频段使用各自的色相,跨越彩虹。单色 = 每次喷溅围绕基础色相在 ±色相范围内浮动。黑白 = 饱和度强制为 0,只有亮度变化。',
+        'SINGLE mode only. 0 = red, 0.17 = yellow, 0.33 = green, 0.5 = cyan, 0.67 = blue, 0.83 = magenta. Loops back to red at 1.':
+            '仅单色模式。0 = 红,0.17 = 黄,0.33 = 绿,0.5 = 青,0.67 = 蓝,0.83 = 品红。1 时回到红色。',
+        'SINGLE mode only. ±jitter around Base hue. 0 = strict single color. 0.3+ = wide spectrum within one family. 0.5 = nearly full rainbow.':
+            '仅单色模式。围绕基础色相的 ±抖动范围。0 = 严格单色,0.3+ = 同色系宽频谱,0.5 = 接近全彩虹。',
+
+        'Post-processing over the fluid. CSS layer: FROST/DREAM (blur), GRAIN/HALFTONE (texture overlay), VIGNETTE (dark corners). SVG glass displacement: REEDED (vertical fluted), RIPPLE (water), PEBBLED (small cobbles), DIAMOND (lattice/patterned), MOLTEN (large organic).':
+            '流体之上的后期处理。CSS 层:磨砂/梦境(模糊)、颗粒/半调(纹理叠加)、暗角(边缘变暗)。SVG 玻璃位移:凹槽(垂直凹槽)、波纹(水)、鹅卵石(小石子)、菱形(格子/图案)、熔融(大型有机)。',
+        'Strength of the active filter. FROST/DREAM: blur radius. GRAIN/HALFTONE: opacity. VIGNETTE: darkness. Glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.':
+            '当前滤镜的强度。磨砂/梦境:模糊半径。颗粒/半调:不透明度。暗角:暗度。玻璃类:像素位移幅度(主要的"深度"调节)。滤镜为"无"时不起作用。',
+
+        'Horizontal noise frequency for the glass texture. LOW (0.001) = wide bands, HIGH (0.1) = tight stripes. For vertical REEDED look, keep this 5–50× higher than Frequency Y.':
+            '玻璃纹理的水平噪声频率。低 (0.001) = 宽条带,高 (0.1) = 紧密条纹。要做垂直凹槽效果,保持此值比 Y 频率高 5-50 倍。',
+        'Vertical noise frequency. Mirror of Frequency X. For pure vertical reeded glass, drop this near 0; for round pebble patterns, match Frequency X.':
+            '垂直噪声频率。X 频率的镜像。纯垂直凹槽玻璃将此值降到接近 0;圆形鹅卵石图案则与 X 频率匹配。',
+        'How many noise octaves are layered. 1 = clean cellular pattern (good for DIAMOND), 3+ = increasingly organic / chaotic (good for RIPPLE).':
+            '叠加的噪声层数。1 = 干净的细胞图案(适合菱形),3+ = 越来越有机 / 混乱(适合波纹)。',
+        'Noise random seed. Drag to scrub through different texture variations of the same style. The pattern changes shape but keeps the same overall feel.':
+            '噪声随机种子。拖动以浏览同一风格的不同纹理变体。图案形状会变化但整体感觉保持一致。',
+        'Extra Gaussian blur layered on top of the displaced canvas. 0 = sharp glass, 2+ = thick frosted look. Mostly used by MOLTEN; great companion to all glass modes.':
+            '叠加在位移后画面之上的额外高斯模糊。0 = 锐利玻璃,2+ = 厚磨砂感。主要用于熔融效果,也适合所有玻璃模式。',
+
+        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = concentric ring ripples at random points across the surface.':
+            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。水母 = 气泡从底部上升。涟漪 = 在画面随机点的同心环涟漪。',
+        'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).':
+            '低于此阈值的频段会被忽略。调高以过滤背景噪声(房间嗡嗡声、微弱的麦克风拾音)。',
+        'How hard each frame pushes the fluid. Higher = more violent motion. The main "intensity" knob.':
+            '每帧推动流体的力度。越高 = 运动越剧烈。主要的"强度"调节。',
+        'How much overall volume amplifies the force. 0 = volume ignored, only per-band energy matters.':
+            '整体音量放大力度的程度。0 = 忽略音量,只考虑各频段的能量。',
+        'Upper limit of per-splat color brightness. The screen can never get brighter than this per splat — bumper against whiteout.':
+            '单次喷溅颜色亮度的上限。每次喷溅的亮度不会超过此值 — 防过曝的保护。',
+        'Soft-clip steepness for per-splat brightness. Higher = approaches Color gain faster (more linear), lower = gentler ramp.':
+            '单次喷溅亮度的软裁陡度。越高 = 接近颜色增益的速度越快(更线性),越低 = 过渡越平缓。',
+        'Loud passages dim each splat (force unchanged). Anti-whiteout. 0 = no compression, 2+ = aggressive ducking on loud sections.':
+            '大音量段落降低每次喷溅的亮度(力度不变)。防过曝。0 = 不压缩,2+ = 大音量时强烈抑制。',
+        'Exponent applied to band energy. >1 = punchier (quiet quieter, loud louder). <1 = compressed dynamics.':
+            '应用于频段能量的指数。>1 = 更有力(安静更安静,大声更大声)。<1 = 动态范围压缩。',
+        "For RANDOM trajectory only — how much each band's splat point drifts over time. 0 = pinned points, 0.2 = roaming.":
+            '仅"随机"轨迹生效 — 每个频段喷溅点随时间漂移的幅度。0 = 固定点,0.2 = 自由游走。',
+
+        'Spectral flux must exceed its rolling average × this to fire an onset. Lower = catches every flicker, higher = only real beats.':
+            '频谱通量必须超过滚动均值 × 此值才触发起音。越低 = 捕捉每一次闪烁,越高 = 仅真正的节拍。',
+        'Minimum gap between consecutive onsets. Raise to prevent machine-gun bursts on busy music.':
+            '相邻起音之间的最小间隔。调高以防止繁忙音乐中连发爆炸。',
+        'Baseline number of splats per onset, regardless of volume.':
+            '每次起音的基础喷溅数,与音量无关。',
+        'Extra splats per onset added by volume. Big rooms get fat bursts; quiet onsets stay light.':
+            '每次起音根据音量额外增加的喷溅数。大场景获得厚重爆发,安静起音保持轻盈。',
+
+        'Freeze the simulation. Splats keep being injected but motion stops. Shortcut: P key.':
+            '冻结模拟。喷溅继续注入但运动停止。快捷键:P。',
+        'Manually fire a multi-splat burst. Useful when testing visuals without audio. Shortcut: Space.':
+            '手动触发多重喷溅爆发。无音频测试视觉时有用。快捷键:空格。',
+        'Restore all Simulation + Effects values to the current preset (DEFAULT / SMOKE / INK / RAINBOW). Audio knobs are not touched.':
+            '将所有模拟 + 视觉效果值恢复到当前预设(默认 / 烟雾 / 墨色 / 彩虹)。音频调节不变。',
+        'Persist every current panel value (fluid + audio + trajectory + filter + glass) to this browser. Next page load will start from this snapshot instead of the factory DEFAULT.':
+            '将当前面板所有值(流体 + 音频 + 轨迹 + 滤镜 + 玻璃)持久化到此浏览器。下次加载将从此快照开始,而非出厂默认。',
+        'Clear the saved snapshot from this browser and reload. Page will come back up with the factory DEFAULT preset.':
+            '清除此浏览器中保存的快照并重新加载。页面将以出厂默认预设重新启动。',
+        'Copy the current panel state to your clipboard as a JSON object. Use this to share a configuration or paste into source code as a new factory default.':
+            '将当前面板状态作为 JSON 对象复制到剪贴板。用于分享配置或作为新出厂默认粘贴到源代码。',
+    },
+};
+
+function t (s, vars) {
+    // Per-lang override first, then English override, then the source string itself.
+    const lang = STRINGS[currentLang];
+    let out = (lang && lang[s]) || (STRINGS.en && STRINGS.en[s]) || s;
+    if (vars) for (const k in vars) out = out.split('{' + k + '}').join(vars[k]);
+    return out;
+}
+
+function applyLanguage () {
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        el.textContent = t(el.dataset.i18n);
+    });
+    document.querySelectorAll('[data-i18n-html]').forEach(el => {
+        el.innerHTML = t(el.dataset.i18nHtml);
+    });
+    // mic-label: shows t('OFF') only when in disconnected state (marked by data-off)
+    const micLabel = document.getElementById('mic-label');
+    if (micLabel && micLabel.hasAttribute('data-off')) micLabel.textContent = t('OFF');
+    // Re-render panel so labels/tips re-translate
+    if (typeof buildSettingsPanel === 'function') {
+        buildSettingsPanel();
+        if (typeof refreshPanel === 'function') refreshPanel();
+    }
+    // Highlight active lang option
+    document.querySelectorAll('.lang-opt').forEach(b => {
+        b.classList.toggle('active', b.dataset.lang === currentLang);
+    });
+    document.documentElement.lang = currentLang === 'zh' ? 'zh-CN' : 'en';
+}
+
+function setLanguage (lang) {
+    if (lang !== 'en' && lang !== 'zh' || lang === currentLang) return;
+    currentLang = lang;
+    try { localStorage.setItem('swirl-lang', lang); } catch (_) {}
+    applyLanguage();
+}
+
 const PANEL_SCHEMA = [
     {
         title: 'Simulation',
@@ -2324,7 +2612,7 @@ const PANEL_SCHEMA = [
               action: (btn) => {
                   if (saveSettingsToStorage()) {
                       const orig = btn.textContent;
-                      btn.textContent = 'Saved ✓';
+                      btn.textContent = t('Saved ✓');
                       setTimeout(() => { btn.textContent = orig; }, 1200);
                   }
               } },
@@ -2336,7 +2624,7 @@ const PANEL_SCHEMA = [
               action: (btn) => {
                   copySettingsAsJSON().then(ok => {
                       const orig = btn.textContent;
-                      btn.textContent = ok ? 'Copied ✓' : 'See console';
+                      btn.textContent = ok ? t('Copied ✓') : t('See console');
                       setTimeout(() => { btn.textContent = orig; }, 1400);
                   });
               } },
@@ -2368,7 +2656,7 @@ function bindTooltip (el, text) {
     el.addEventListener('mouseenter', () => {
         clearTimeout(__tipHideTimer);
         const tip = ensureTooltipEl();
-        tip.textContent = text;
+        tip.textContent = t(text);
         tip.classList.add('visible');
         const r = el.getBoundingClientRect();
         // Position to the right of the panel, vertically aligned with control center
@@ -2395,7 +2683,7 @@ function buildSettingsPanel () {
     PANEL_SCHEMA.forEach(section => {
         const sec = document.createElement('section');
         const h = document.createElement('h3');
-        h.textContent = section.title;
+        h.textContent = t(section.title);
         sec.appendChild(h);
         section.items.forEach(item => sec.appendChild(buildControl(item)));
         panel.appendChild(sec);
@@ -2412,7 +2700,7 @@ function buildControl (item) {
         const row = document.createElement('div');
         row.className = 'ctrl-row';
         const lbl = document.createElement('span');
-        lbl.textContent = item.label;
+        lbl.textContent = t(item.label);
         const val = document.createElement('span');
         val.className = 'ctrl-value';
         row.appendChild(lbl); row.appendChild(val);
@@ -2441,11 +2729,11 @@ function buildControl (item) {
         const row = document.createElement('div');
         row.className = 'ctrl-row';
         const lbl = document.createElement('span');
-        lbl.textContent = item.label;
+        lbl.textContent = t(item.label);
         const sel = document.createElement('select');
         item.options.forEach(o => {
             const opt = document.createElement('option');
-            opt.value = o; opt.textContent = o;
+            opt.value = o; opt.textContent = t(o);
             sel.appendChild(opt);
         });
         const sync = () => { sel.value = String(item.get()); };
@@ -2461,7 +2749,7 @@ function buildControl (item) {
         const lab = document.createElement('label');
         lab.className = 'ctrl-toggle';
         const txt = document.createElement('span');
-        txt.textContent = item.label;
+        txt.textContent = t(item.label);
         const inp = document.createElement('input');
         inp.type = 'checkbox';
         const dot = document.createElement('span');
@@ -2479,7 +2767,7 @@ function buildControl (item) {
         const row = document.createElement('div');
         row.className = 'ctrl-row';
         const lbl = document.createElement('span');
-        lbl.textContent = item.label;
+        lbl.textContent = t(item.label);
         const inp = document.createElement('input');
         inp.type = 'color';
         const sync = () => { inp.value = item.get(); };
@@ -2494,7 +2782,7 @@ function buildControl (item) {
     if (item.type === 'button') {
         const btn = document.createElement('button');
         btn.className = 'ctrl-button';
-        btn.textContent = item.label;
+        btn.textContent = t(item.label);
         btn.addEventListener('click', () => item.action(btn));
         wrap.appendChild(btn);
         return wrap;
@@ -2616,6 +2904,13 @@ window.addEventListener('DOMContentLoaded', () => {
         panelToggle.classList.remove('open');
     });
 
+    // Language toggle: EN / 中. setLanguage() re-renders panel + statics.
+    document.querySelectorAll('.lang-opt').forEach(btn => {
+        btn.addEventListener('click', () => setLanguage(btn.dataset.lang));
+    });
+    // Apply currently-loaded language now that all DOM + panel exist
+    applyLanguage();
+
     // Presentation mode: body.presenting hides all chrome (title, tabs,
     // panel, footer, mic-status) via CSS; only the toggle itself stays.
     const presentToggle = document.getElementById('present-toggle');
@@ -2644,8 +2939,10 @@ window.addEventListener('DOMContentLoaded', () => {
     const displayBtn = document.querySelector('.src-btn[data-source="display"]');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
         displayBtn.disabled = true;
-        displayBtn.querySelector('.src-hint').textContent =
-            'Not supported in this browser — try Chrome or Edge';
+        // Tag with i18n key so applyLanguage() can re-render on toggle
+        const hintEl = displayBtn.querySelector('.src-hint');
+        hintEl.dataset.i18n = 'Not supported in this browser — try Chrome or Edge';
+        hintEl.textContent = t('Not supported in this browser — try Chrome or Edge');
     }
 
     function setHint (msg, isError) {
@@ -2668,7 +2965,7 @@ window.addEventListener('DOMContentLoaded', () => {
     async function showDevicePickerView () {
         sourceButtonsEl.hidden = true;
         devicePicker.hidden = false;
-        deviceList.innerHTML = '<div class="device-item" style="cursor:default; opacity:0.5">Loading devices…</div>';
+        deviceList.innerHTML = '<div class="device-item" style="cursor:default; opacity:0.5">' + t('Loading devices…') + '</div>';
         setHint('');
         const audio = getAnalyzer();
         try {
@@ -2678,9 +2975,9 @@ window.addEventListener('DOMContentLoaded', () => {
             console.error('Enumerate error:', err);
             deviceList.innerHTML = '';
             if (err && err.name === 'NotAllowedError') {
-                setHint('Microphone permission denied — needed to list devices.', true);
+                setHint(t('Microphone permission denied — needed to list devices.'), true);
             } else {
-                setHint('Could not list audio devices.', true);
+                setHint(t('Could not list audio devices.'), true);
             }
         }
     }
@@ -2692,7 +2989,7 @@ window.addEventListener('DOMContentLoaded', () => {
             empty.className = 'device-item';
             empty.style.cursor = 'default';
             empty.style.opacity = '0.5';
-            empty.textContent = 'No audio inputs found.';
+            empty.textContent = t('No audio inputs found.');
             deviceList.appendChild(empty);
             return;
         }
@@ -2709,10 +3006,13 @@ window.addEventListener('DOMContentLoaded', () => {
     function reflectActiveSource (label) {
         if (label) {
             micDot.classList.add('active');
+            micLabel.removeAttribute('data-off');
             micLabel.textContent = label;
         } else {
             micDot.classList.remove('active');
-            micLabel.textContent = 'OFF';
+            // data-off marker lets applyLanguage() re-translate this on toggle
+            micLabel.setAttribute('data-off', '');
+            micLabel.textContent = t('OFF');
         }
     }
 
@@ -2722,7 +3022,7 @@ window.addEventListener('DOMContentLoaded', () => {
             window.__audio = new AudioAnalyzer();
             window.__audio.onSourceEnded = (kind) => {
                 reflectActiveSource(null);
-                setHint(`Source ended (${kind}). Pick another one.`);
+                setHint(t('Source ended ({kind}). Pick another one.', { kind }));
                 showOverlay();
             };
         }
@@ -2731,7 +3031,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
     async function pickSource (kind, file, deviceId) {
         srcBtns.forEach(b => b.disabled = true);
-        setHint('Requesting…');
+        setHint(t('Requesting…'));
         const audio = getAnalyzer();
         try {
             if (kind === 'mic') {
@@ -2752,16 +3052,16 @@ window.addEventListener('DOMContentLoaded', () => {
             srcBtns.forEach(b => { if (!b.dataset.permaDisabled) b.disabled = false; });
             const msg = err && err.message;
             if (msg === 'UNSUPPORTED') {
-                setHint('This browser does not support tab / system audio capture.', true);
+                setHint(t('This browser does not support tab / system audio capture.'), true);
             } else if (msg === 'NO_AUDIO_TRACK') {
-                setHint('No audio captured. Check "Share audio" when picking the source.', true);
+                setHint(t('No audio captured. Check "Share audio" when picking the source.'), true);
             } else if (err && err.name === 'NotAllowedError') {
-                setHint('Permission denied. Allow access in your browser and try again.', true);
+                setHint(t('Permission denied. Allow access in your browser and try again.'), true);
             } else if (err && err.name === 'OverconstrainedError') {
-                setHint('That device is no longer available. Pick another.', true);
+                setHint(t('That device is no longer available. Pick another.'), true);
                 showDevicePickerView();
             } else {
-                setHint('Failed to start source. See console for details.', true);
+                setHint(t('Failed to start source. See console for details.'), true);
             }
         }
     }
@@ -2824,7 +3124,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const audio = window.__audio;
         if (!audio || !audio.ready) {
             overlay.classList.remove('hidden');
-            setHint('Microphone didn\'t start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed.');
+            setHint(t("Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed."));
         }
     }, 3000);
 

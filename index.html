@@ -334,6 +334,42 @@
         }
 
         /* ============================================================
+           LANGUAGE TOGGLE — EN / 中 segmented switch
+           ============================================================ */
+
+        .lang-toggle {
+            position: absolute;
+            bottom: 60px;
+            right: 100px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            z-index: 6;
+            font: 500 12px/1 var(--font-mono);
+            color: var(--on-dark-mute);
+            transition: opacity 0.2s ease, bottom 0.25s ease;
+        }
+        .lang-opt {
+            background: none;
+            border: none;
+            color: var(--on-dark-mute);
+            font: inherit;
+            padding: 0 2px;
+            cursor: pointer;
+            transition: color 0.15s ease;
+        }
+        .lang-opt:hover { color: var(--on-dark); }
+        .lang-opt.active { color: var(--on-dark); }
+        .lang-sep { color: var(--on-dark-mute); }
+
+        body.presenting .lang-toggle {
+            opacity: 0.25;
+            bottom: 24px;
+            right: 100px;
+        }
+        body.presenting .lang-toggle:hover { opacity: 1; }
+
+        /* ============================================================
            DEBUG HUD
            ============================================================ */
 
@@ -838,39 +874,44 @@
 
     <div class="ui">
         <div class="title">SWIRL</div>
-        <button class="panel-toggle" id="panel-toggle">Settings</button>
+        <button class="panel-toggle" id="panel-toggle" data-i18n="Settings">Settings</button>
 
         <div class="modes">
-            <button data-mode="DEFAULT">Default</button>
-            <button data-mode="SMOKE" class="active">Smoke</button>
-            <button data-mode="INK">Ink</button>
-            <button data-mode="RAINBOW">Rainbow</button>
-            <button data-mode="AQUA">Aqua</button>
-            <button data-mode="BLINK">Blink</button>
+            <button data-mode="DEFAULT" data-i18n="Default">Default</button>
+            <button data-mode="SMOKE" class="active" data-i18n="Smoke">Smoke</button>
+            <button data-mode="INK" data-i18n="Ink">Ink</button>
+            <button data-mode="RAINBOW" data-i18n="Rainbow">Rainbow</button>
+            <button data-mode="AQUA" data-i18n="Aqua">Aqua</button>
+            <button data-mode="BLINK" data-i18n="Blink">Blink</button>
         </div>
 
         <div class="filters">
-            <button data-filter="NONE" class="active">None</button>
-            <button data-filter="FROST">Frost</button>
-            <button data-filter="DREAM">Dream</button>
-            <button data-filter="GRAIN">Grain</button>
-            <button data-filter="VIGNETTE">Vignette</button>
-            <button data-filter="HALFTONE">Halftone</button>
-            <button data-filter="REEDED">Reeded</button>
-            <button data-filter="RIPPLE">Ripple</button>
-            <button data-filter="PEBBLED">Pebbled</button>
-            <button data-filter="DIAMOND">Diamond</button>
-            <button data-filter="MOLTEN">Molten</button>
+            <button data-filter="NONE" class="active" data-i18n="None">None</button>
+            <button data-filter="FROST" data-i18n="Frost">Frost</button>
+            <button data-filter="DREAM" data-i18n="Dream">Dream</button>
+            <button data-filter="GRAIN" data-i18n="Grain">Grain</button>
+            <button data-filter="VIGNETTE" data-i18n="Vignette">Vignette</button>
+            <button data-filter="HALFTONE" data-i18n="Halftone">Halftone</button>
+            <button data-filter="REEDED" data-i18n="Reeded">Reeded</button>
+            <button data-filter="RIPPLE" data-i18n="Ripple">Ripple</button>
+            <button data-filter="PEBBLED" data-i18n="Pebbled">Pebbled</button>
+            <button data-filter="DIAMOND" data-i18n="Diamond">Diamond</button>
+            <button data-filter="MOLTEN" data-i18n="Molten">Molten</button>
         </div>
 
         <div class="footer-left">52&deg;30'N 13&deg;24'E</div>
         <div class="footer-center">+ 2026</div>
         <div class="mic-status">
-            <span id="mic-label">OFF</span>
+            <span id="mic-label" data-off>OFF</span>
             <span class="mic-dot" id="mic-dot"></span>
         </div>
 
-        <button class="present-toggle" id="present-toggle" type="button">present</button>
+        <div class="lang-toggle">
+            <button class="lang-opt active" data-lang="en" type="button">EN</button>
+            <span class="lang-sep">|</span>
+            <button class="lang-opt" data-lang="zh" type="button">中</button>
+        </div>
+        <button class="present-toggle" id="present-toggle" type="button" data-i18n="present">present</button>
 
         <pre class="debug" id="debug"></pre>
     </div>
@@ -881,31 +922,31 @@
 
     <div class="overlay hidden" id="overlay">
         <h1>SWIRL</h1>
-        <p>Audio-reactive fluid simulation. Enable your microphone to begin.</p>
+        <p data-i18n="Audio-reactive fluid simulation. Enable your microphone to begin.">Audio-reactive fluid simulation. Enable your microphone to begin.</p>
         <div class="source-buttons">
             <button class="src-btn" data-source="mic">
-                <span class="src-name">Microphone</span>
-                <span class="src-hint">Use the default system microphone</span>
+                <span class="src-name" data-i18n="Microphone">Microphone</span>
+                <span class="src-hint" data-i18n="Use the default system microphone">Use the default system microphone</span>
             </button>
             <!-- Temporarily hidden: other input sources. Remove `hidden` to bring back. -->
             <button class="src-btn" data-source="display" hidden>
-                <span class="src-name">Browser tab / system audio</span>
-                <span class="src-hint">Pick a tab or share your screen with audio</span>
+                <span class="src-name" data-i18n="Browser tab / system audio">Browser tab / system audio</span>
+                <span class="src-hint" data-i18n="Pick a tab or share your screen with audio">Pick a tab or share your screen with audio</span>
             </button>
             <button class="src-btn" data-source="file" hidden>
-                <span class="src-name">Audio file</span>
-                <span class="src-hint">MP3, WAV, OGG &mdash; plays on loop</span>
+                <span class="src-name" data-i18n="Audio file">Audio file</span>
+                <span class="src-hint" data-i18n="MP3, WAV, OGG — plays on loop">MP3, WAV, OGG &mdash; plays on loop</span>
             </button>
         </div>
         <input type="file" id="file-input" accept="audio/*" hidden>
 
         <div class="device-picker" id="device-picker" hidden>
             <div class="device-picker-header">
-                <button class="device-back" id="device-back">[&larr;] Back</button>
-                <span class="device-picker-title">Choose audio input</span>
+                <button class="device-back" id="device-back" data-i18n="[← ] Back">[&larr;] Back</button>
+                <span class="device-picker-title" data-i18n="Choose audio input">Choose audio input</span>
             </div>
             <div class="device-list" id="device-list"></div>
-            <div class="device-picker-foot">
+            <div class="device-picker-foot" data-i18n-html="device.foot">
                 Don&apos;t see your app? Install a virtual audio cable<br>
                 (<a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">VB-Cable</a> on Windows,
                 <a href="https://github.com/ExistentialAudio/BlackHole" target="_blank" rel="noopener">BlackHole</a> on macOS)
