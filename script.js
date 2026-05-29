@@ -1806,7 +1806,7 @@ const TRAJECTORY = {
         const len = Math.hypot(drift, 1);
         return { x, y, dx: drift / len, dy: 1 / len };
     },
-    RAIN: (i, t) => {
+    BLINK: (i, t) => {
         // Each splat is a raindrop impact at a random (x, y) on the canvas.
         // Direction is fully random — the splat causes a tiny local turbulence
         // that the high-curl preset spins into ripple-like rings.
@@ -1908,9 +1908,9 @@ function applyAudioInputs (audio) {
     const compress = 1 / (1 + audio.smoothedVolume * AUDIO.VOLUME_COMPRESS);
     const effectiveGain = AUDIO.COLOR_GAIN * compress;
 
-    // Per-trajectory tweaks for discrete-event modes (AQUA, RAIN).
+    // Per-trajectory tweaks for discrete-event modes (AQUA, BLINK).
     const isAqua = currentTrajectory === 'AQUA';
-    const isRain = currentTrajectory === 'RAIN';
+    const isBlink = currentTrajectory === 'BLINK';
     const origRadius = config.SPLAT_RADIUS;
 
     for (let i = 0; i < NUM_BANDS; i++) {
@@ -1919,15 +1919,15 @@ function applyAudioInputs (audio) {
 
         const e = Math.pow(energy, AUDIO.ENERGY_CURVE);
 
-        // Stochastic gate so AQUA bubbles / RAIN drops are discrete events,
+        // Stochastic gate so AQUA bubbles / BLINK rings are discrete events,
         // not a 360-splats-per-second continuous stream.
         if (isAqua && Math.random() > e * 0.10) continue;
-        if (isRain && Math.random() > e * 0.18) continue;
+        if (isBlink && Math.random() > e * 0.18) continue;
 
         const pt = traj(i, t);
 
-        // AQUA: gentle rising bubbles (not jets). RAIN: tiny impact pulses.
-        const forceMult = isAqua ? 0.35 : isRain ? 0.20 : 1.0;
+        // AQUA: gentle rising bubbles (not jets). BLINK: tiny impact pulses.
+        const forceMult = isAqua ? 0.35 : isBlink ? 0.20 : 1.0;
         const force = e * AUDIO.SPLAT_FORCE * forceMult * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
         const dx = pt.dx * force;
         const dy = pt.dy * force;
@@ -1943,7 +1943,7 @@ function applyAudioInputs (audio) {
             splat(pt.x, pt.y, dx, dy, color);
             continue;
         }
-        if (isRain) {
+        if (isBlink) {
             // True ring ripple: N splats arranged in a circle around the impact
             // point, each pushing radially OUTWARD. This is what creates the
             // visible concentric expanding ring instead of a single splotch.
@@ -1966,7 +1966,7 @@ function applyAudioInputs (audio) {
         splat(pt.x, pt.y, dx, dy, color);
     }
 
-    if (isAqua || isRain) config.SPLAT_RADIUS = origRadius;
+    if (isAqua || isBlink) config.SPLAT_RADIUS = origRadius;
 
     if (audio.onset) {
         const burst = Math.max(1, Math.floor(AUDIO.ONSET_BURST_BASE + audio.smoothedVolume * AUDIO.ONSET_BURST_GAIN));
@@ -1979,7 +1979,7 @@ function applyAudioInputs (audio) {
 // blows out the screen on loud beats.
 function audioBurst (amount, audio, gain) {
     const isAqua = currentTrajectory === 'AQUA';
-    const isRain = currentTrajectory === 'RAIN';
+    const isBlink = currentTrajectory === 'BLINK';
     const origRadius = config.SPLAT_RADIUS;
     for (let i = 0; i < amount; i++) {
         // Bursts are inherently punchier — push the energy term up,
@@ -1995,7 +1995,7 @@ function audioBurst (amount, audio, gain) {
             splat(Math.random(), 0.02, 0, f, color);
             continue;
         }
-        if (isRain) {
+        if (isBlink) {
             // Burst raindrop = a single, larger ring ripple at a random spot
             const cx = Math.random(), cy = Math.random();
             const RING_COUNT = 10;
@@ -2015,7 +2015,7 @@ function audioBurst (amount, audio, gain) {
         const ang = Math.random() * Math.PI * 2;
         splat(Math.random(), Math.random(), Math.cos(ang) * f, Math.sin(ang) * f, color);
     }
-    if (isRain) config.SPLAT_RADIUS = origRadius;
+    if (isBlink) config.SPLAT_RADIUS = origRadius;
 }
 
 // ============================================================
@@ -2091,9 +2091,9 @@ const PRESETS = {
         SUNRAYS_WEIGHT: 0.6,
         SHADING: true,
     },
-    RAIN: {
-        _trajectory: 'RAIN',           // behavioural preset — random raindrop impacts
-        _palette: { mode: 'MONO' },    // greyscale raindrops on dark water surface
+    BLINK: {
+        _trajectory: 'BLINK',           // behavioural preset — concentric ring blinks at random points
+        _palette: { mode: 'MONO' },    // greyscale rings on dark surface (override per palette panel)
         DENSITY_DISSIPATION: 1.4,      // ripple ink fades after the ring expands
         VELOCITY_DISSIPATION: 0.7,     // low damping — let the ring keep expanding outward
         PRESSURE: 0.85,                // mid — incompressible water-surface feel
@@ -2254,8 +2254,8 @@ const PANEL_SCHEMA = [
         title: 'Audio → Fluid',
         items: [
             { type: 'select', label: 'Trajectory',
-              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA', 'RAIN'],
-              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. RAIN = raindrops land at random points across the surface.',
+              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA', 'BLINK'],
+              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = concentric ring ripples at random points across the surface.',
               get: () => currentTrajectory, set: v => currentTrajectory = v },
             { type: 'range', label: 'Band threshold', min: 0,    max: 0.3,  step: 0.005,
               tip: 'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).',
@@ -2555,8 +2555,8 @@ function loadSettingsFromStorage () {
         if (s.AUDIO)         Object.assign(AUDIO, s.AUDIO);
         if (s.PALETTE)       Object.assign(PALETTE, s.PALETTE);
         if (s.filterState)   Object.assign(filterState, s.filterState);
-        if (typeof s.currentTrajectory === 'string')  currentTrajectory  = s.currentTrajectory;
-        if (typeof s.currentPresetName === 'string')  currentPresetName  = s.currentPresetName;
+        if (typeof s.currentTrajectory === 'string')  currentTrajectory  = s.currentTrajectory === 'RAIN' ? 'BLINK' : s.currentTrajectory;
+        if (typeof s.currentPresetName === 'string')  currentPresetName  = s.currentPresetName === 'RAIN' ? 'BLINK' : s.currentPresetName;
         return true;
     } catch (e) {
         console.warn('Load failed:', e);
@@ -2614,6 +2614,19 @@ window.addEventListener('DOMContentLoaded', () => {
     panelClose.addEventListener('click', () => {
         panel.classList.remove('open');
         panelToggle.classList.remove('open');
+    });
+
+    // Presentation mode: body.presenting hides all chrome (title, tabs,
+    // panel, footer, mic-status) via CSS; only the toggle itself stays.
+    const presentToggle = document.getElementById('present-toggle');
+    presentToggle.addEventListener('click', () => {
+        const on = document.body.classList.toggle('presenting');
+        presentToggle.classList.toggle('active', on);
+        if (on) {
+            // Auto-close the settings panel so it can't pop back in over the canvas
+            panel.classList.remove('open');
+            panelToggle.classList.remove('open');
+        }
     });
 
     const overlay = document.getElementById('overlay');

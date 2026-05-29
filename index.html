@@ -296,6 +296,44 @@
         .panel-toggle.open::before { content: '[-] '; }
 
         /* ============================================================
+           PRESENTATION TOGGLE — collapses all chrome into a single switch
+           ============================================================ */
+
+        .present-toggle {
+            position: absolute;
+            bottom: 60px;
+            right: 28px;
+            background: none;
+            border: none;
+            color: var(--on-dark-mute);
+            font: 500 12px/1 var(--font-mono);
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+            padding: 0;
+            z-index: 6;
+            transition: color 0.15s ease, opacity 0.2s ease, bottom 0.25s ease;
+        }
+        .present-toggle:hover { color: var(--on-dark); opacity: 1; }
+        .present-toggle::before { content: '[+] '; }
+        .present-toggle.active::before { content: '[-] '; }
+
+        body.presenting .title,
+        body.presenting .modes,
+        body.presenting .filters,
+        body.presenting .panel-toggle,
+        body.presenting .footer-left,
+        body.presenting .footer-center,
+        body.presenting .mic-status,
+        body.presenting .debug,
+        body.presenting .panel { display: none !important; }
+
+        body.presenting .present-toggle {
+            opacity: 0.25;
+            bottom: 24px;
+        }
+
+        /* ============================================================
            DEBUG HUD
            ============================================================ */
 
@@ -808,7 +846,7 @@
             <button data-mode="INK">Ink</button>
             <button data-mode="RAINBOW">Rainbow</button>
             <button data-mode="AQUA">Aqua</button>
-            <button data-mode="RAIN">Rain</button>
+            <button data-mode="BLINK">Blink</button>
         </div>
 
         <div class="filters">
@@ -831,6 +869,8 @@
             <span id="mic-label">OFF</span>
             <span class="mic-dot" id="mic-dot"></span>
         </div>
+
+        <button class="present-toggle" id="present-toggle" type="button">present</button>
 
         <pre class="debug" id="debug"></pre>
     </div>
