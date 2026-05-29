@@ -1806,6 +1806,15 @@ const TRAJECTORY = {
         const len = Math.hypot(drift, 1);
         return { x, y, dx: drift / len, dy: 1 / len };
     },
+    RAIN: (i, t) => {
+        // Each splat is a raindrop impact at a random (x, y) on the canvas.
+        // Direction is fully random — the splat causes a tiny local turbulence
+        // that the high-curl preset spins into ripple-like rings.
+        const x = Math.random();
+        const y = Math.random();
+        const angle = Math.random() * Math.PI * 2;
+        return { x, y, dx: Math.cos(angle), dy: Math.sin(angle) };
+    },
 };
 
 let currentTrajectory = 'RANDOM';
@@ -1899,9 +1908,9 @@ function applyAudioInputs (audio) {
     const compress = 1 / (1 + audio.smoothedVolume * AUDIO.VOLUME_COMPRESS);
     const effectiveGain = AUDIO.COLOR_GAIN * compress;
 
-    // AQUA mode tweaks: per-splat radius scales with energy + volume,
-    // and the hue is locked to the aqua range regardless of band anchor.
+    // Per-trajectory tweaks for discrete-event modes (AQUA, RAIN).
     const isAqua = currentTrajectory === 'AQUA';
+    const isRain = currentTrajectory === 'RAIN';
     const origRadius = config.SPLAT_RADIUS;
 
     for (let i = 0; i < NUM_BANDS; i++) {
@@ -1910,16 +1919,15 @@ function applyAudioInputs (audio) {
 
         const e = Math.pow(energy, AUDIO.ENERGY_CURVE);
 
-        // AQUA: stochastic gate so bubbles are discrete events, not a
-        // 360-splats-per-second continuous stream. Higher energy → more
-        // likely to spawn this frame. Roughly 10–25 splats/sec when loud.
+        // Stochastic gate so AQUA bubbles / RAIN drops are discrete events,
+        // not a 360-splats-per-second continuous stream.
         if (isAqua && Math.random() > e * 0.10) continue;
+        if (isRain && Math.random() > e * 0.18) continue;
 
         const pt = traj(i, t);
 
-        // AQUA: gentle rising bubbles, not jet propulsion. Cut the force
-        // multiplier so they drift up over seconds, not milliseconds.
-        const forceMult = isAqua ? 0.35 : 1.0;
+        // AQUA: gentle rising bubbles (not jets). RAIN: tiny impact pulses.
+        const forceMult = isAqua ? 0.35 : isRain ? 0.20 : 1.0;
         const force = e * AUDIO.SPLAT_FORCE * forceMult * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
         const dx = pt.dx * force;
         const dy = pt.dy * force;
@@ -1930,14 +1938,16 @@ function applyAudioInputs (audio) {
         const color = paletteColor(i, intensity);
 
         if (isAqua) {
-            // Bubble radius: small when quiet, medium when loud — not
-            // explosively scaled so we don't get blob mush
+            // Bubble radius: small when quiet, medium when loud
             config.SPLAT_RADIUS = origRadius * (0.6 + e * 0.5 + audio.smoothedVolume * 0.3);
+        } else if (isRain) {
+            // Raindrop size: tiny when quiet, larger drops when loud
+            config.SPLAT_RADIUS = origRadius * (0.5 + e * 0.8 + audio.smoothedVolume * 0.4);
         }
         splat(pt.x, pt.y, dx, dy, color);
     }
 
-    if (isAqua) config.SPLAT_RADIUS = origRadius;
+    if (isAqua || isRain) config.SPLAT_RADIUS = origRadius;
 
     if (audio.onset) {
         const burst = Math.max(1, Math.floor(AUDIO.ONSET_BURST_BASE + audio.smoothedVolume * AUDIO.ONSET_BURST_GAIN));
@@ -2047,6 +2057,21 @@ const PRESETS = {
         BLOOM_THRESHOLD: 0.55,
         SUNRAYS: false,                // sunrays scramble the up-direction
         SUNRAYS_WEIGHT: 0.6,
+        SHADING: true,
+    },
+    RAIN: {
+        _trajectory: 'RAIN',           // behavioural preset — random raindrop impacts
+        _palette: { mode: 'MONO' },    // greyscale raindrops on dark water surface
+        DENSITY_DISSIPATION: 1.3,      // ripples linger long enough to be visible
+        VELOCITY_DISSIPATION: 1.5,     // strong damping — impacts stop fast, water settles
+        PRESSURE: 0.9,                 // high — incompressible water surface feel
+        CURL: 35,                      // high curl spins each impact into ring-like swirl
+        SPLAT_RADIUS: 0.10,            // tiny droplets (modulated bigger when loud)
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.65,
+        BLOOM_THRESHOLD: 0.5,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.5,
         SHADING: true,
     },
 };
@@ -2197,8 +2222,8 @@ const PANEL_SCHEMA = [
         title: 'Audio → Fluid',
         items: [
             { type: 'select', label: 'Trajectory',
-              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA'],
-              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = jets shoot straight up from the bottom edge, size & speed scale with audio.',
+              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA', 'RAIN'],
+              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. RAIN = raindrops land at random points across the surface.',
               get: () => currentTrajectory, set: v => currentTrajectory = v },
             { type: 'range', label: 'Band threshold', min: 0,    max: 0.3,  step: 0.005,
               tip: 'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).',
