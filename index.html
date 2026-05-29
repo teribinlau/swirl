@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>SWIRL — audio-reactive fluid</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /* ============================================================
+           OpenCode design tokens
+           ============================================================ */
+        :root {
+            /* Colors */
+            --canvas: #fdfcfc;
+            --ink: #201d1d;
+            --ink-deep: #0f0000;
+            --body: #424245;
+            --mute: #646262;
+            --stone: #6e6e73;
+            --ash: #9a9898;
+            --surface-soft: #f8f7f7;
+            --surface-card: #f1eeee;
+            --surface-dark: #201d1d;
+            --surface-dark-elevated: #302c2c;
+            --hairline: rgba(15, 0, 0, 0.12);
+            --hairline-strong: #646262;
+            --on-dark: #fdfcfc;
+            --on-dark-mute: #9a9898;
+            --accent: #007aff;
+            --danger: #ff3b30;
+            --success: #30d158;
+
+            /* Fonts */
+            --font-mono: 'Berkeley Mono', 'JetBrains Mono', 'IBM Plex Mono',
+                         ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+                         'Liberation Mono', 'Courier New', monospace;
+
+            /* Spacing */
+            --xxs: 1px;
+            --xs:  4px;
+            --sm:  8px;
+            --md:  12px;
+            --lg:  16px;
+            --xl:  24px;
+            --xxl: 32px;
+
+            /* Radii */
+            --r-sm: 4px;
+            --r-none: 0;
+        }
+
+        * {
+            user-select: none;
+            -webkit-user-select: none;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: var(--font-mono);
+            font-feature-settings: 'liga' 0, 'calt' 0;
+        }
+
+        body {
+            position: fixed;
+            inset: 0;
+            color: var(--on-dark);
+            font-size: 14px;
+            font-weight: 400;
+            line-height: 1.5;
+            letter-spacing: 0;
+        }
+
+        canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .ui {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            z-index: 2;
+        }
+        .ui > * { pointer-events: auto; }
+
+        /* ============================================================
+           TOP CHROME on the dark canvas — terminal-like overlay text
+           ============================================================ */
+
+        .title {
+            position: absolute;
+            top: var(--xl);
+            left: 28px;
+            font-weight: 700;
+            font-size: 14px;
+            color: var(--on-dark);
+            letter-spacing: 0;
+        }
+
+        .modes {
+            position: absolute;
+            top: var(--xl);
+            right: 28px;
+            display: flex;
+            gap: 0;
+        }
+        .modes button {
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--on-dark-mute);
+            font: 500 14px/1 var(--font-mono);
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+            padding: 8px 16px;
+            transition: color 0.15s ease, border-color 0.15s ease;
+        }
+        .modes button:hover { color: var(--on-dark); }
+        .modes button.active {
+            color: var(--on-dark);
+            border-bottom-color: var(--ash);
+        }
+
+        /* Filter tab bar — second row under .modes */
+        .filters {
+            position: absolute;
+            top: 56px;
+            right: 28px;
+            display: flex;
+            gap: 0;
+        }
+        .filters button {
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--on-dark-mute);
+            font: 500 12px/1 var(--font-mono);
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+            padding: 6px 10px;
+            transition: color 0.15s ease, border-color 0.15s ease;
+        }
+        .filters button:hover { color: var(--on-dark); }
+        .filters button.active {
+            color: var(--on-dark);
+            border-bottom-color: var(--ash);
+        }
+
+        /* ============================================================
+           FILTER OVERLAY — post-processing layer over the fluid canvas
+           One element, switched via [data-filter="..."] attribute.
+           CSS variable --filter-strength (0..100) drives intensity.
+           ============================================================ */
+
+        .filter-overlay {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            z-index: 1;
+            --filter-strength: 50;
+            transition:
+                backdrop-filter 0.25s ease,
+                -webkit-backdrop-filter 0.25s ease,
+                opacity 0.25s ease,
+                background 0.25s ease;
+        }
+
+        .filter-overlay[data-filter="NONE"] {
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+            background: none;
+            opacity: 0;
+        }
+
+        /* Frost — frosted glass blur over the fluid (the "磨砂" effect) */
+        .filter-overlay[data-filter="FROST"] {
+            backdrop-filter:
+                blur(calc(var(--filter-strength) * 0.4px))
+                brightness(0.96)
+                saturate(0.92);
+            -webkit-backdrop-filter:
+                blur(calc(var(--filter-strength) * 0.4px))
+                brightness(0.96)
+                saturate(0.92);
+            background: rgba(253, 252, 252, 0.02);
+        }
+
+        /* Dream — heavier blur + boosted saturation/brightness, hazier */
+        .filter-overlay[data-filter="DREAM"] {
+            backdrop-filter:
+                blur(calc(var(--filter-strength) * 0.8px))
+                saturate(calc(1 + var(--filter-strength) * 0.012))
+                brightness(calc(1 + var(--filter-strength) * 0.003));
+            -webkit-backdrop-filter:
+                blur(calc(var(--filter-strength) * 0.8px))
+                saturate(calc(1 + var(--filter-strength) * 0.012))
+                brightness(calc(1 + var(--filter-strength) * 0.003));
+        }
+
+        /* Grain — fractal-noise SVG tiled and blended over the canvas */
+        .filter-overlay[data-filter="GRAIN"] {
+            background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.8 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+            background-size: 240px 240px;
+            mix-blend-mode: overlay;
+            opacity: calc(var(--filter-strength) * 0.01);
+        }
+
+        /* Vignette — radial darkening from edges inward */
+        .filter-overlay[data-filter="VIGNETTE"] {
+            background: radial-gradient(
+                ellipse at center,
+                transparent 35%,
+                rgba(0, 0, 0, calc(var(--filter-strength) * 0.012)) 100%
+            );
+        }
+
+        /* Halftone — tiny dot grid blended via multiply, retro print look */
+        .filter-overlay[data-filter="HALFTONE"] {
+            background-image: radial-gradient(
+                circle at center,
+                rgba(0, 0, 0, 0.9) 1px,
+                transparent 1.4px
+            );
+            background-size: calc(8px - var(--filter-strength) * 0.03px) calc(8px - var(--filter-strength) * 0.03px);
+            mix-blend-mode: multiply;
+            opacity: calc(0.2 + var(--filter-strength) * 0.008);
+        }
+
+        .footer-left, .footer-center, .mic-status {
+            position: absolute;
+            bottom: var(--xl);
+            font-size: 12px;
+            color: var(--on-dark-mute);
+        }
+        .footer-left { left: 28px; }
+        .footer-center {
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        .mic-status {
+            right: 28px;
+            display: flex;
+            align-items: center;
+            gap: var(--sm);
+        }
+        /* ASCII status indicator: [ ] off  →  [●] on */
+        .mic-dot {
+            display: inline-block;
+            width: auto;
+            height: auto;
+            background: none;
+            border-radius: 0;
+            font-family: var(--font-mono);
+            color: var(--on-dark-mute);
+        }
+        .mic-dot::before { content: '[ ]'; }
+        .mic-dot.active { color: var(--success); box-shadow: none; }
+        .mic-dot.active::before { content: '[●]'; }
+
+        /* ============================================================
+           PANEL TOGGLE — bracketed `[+]` / `[-]` opener
+           ============================================================ */
+
+        .panel-toggle {
+            position: absolute;
+            top: 56px;
+            left: 28px;
+            background: none;
+            border: none;
+            color: var(--on-dark-mute);
+            font: 500 12px/1 var(--font-mono);
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+            padding: 0;
+            z-index: 6;
+            transition: color 0.15s ease;
+        }
+        .panel-toggle:hover { color: var(--on-dark); }
+        .panel-toggle.open { color: var(--on-dark); }
+        .panel-toggle::before { content: '[+] '; }
+        .panel-toggle.open::before { content: '[-] '; }
+
+        /* ============================================================
+           DEBUG HUD
+           ============================================================ */
+
+        .debug {
+            position: absolute;
+            top: 92px;
+            left: 28px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            line-height: 1.4;
+            color: var(--on-dark-mute);
+            display: none;
+            pointer-events: none;
+            margin: 0;
+        }
+        .debug.visible { display: block; }
+
+        /* ============================================================
+           SETTINGS PANEL — opencode cream surface, hairline sections
+           ============================================================ */
+
+        .panel {
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: 320px;
+            background: var(--canvas);
+            color: var(--ink);
+            padding: 92px 24px 24px;
+            overflow-y: auto;
+            transform: translateX(-100%);
+            transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+            z-index: 5;
+            border-right: 1px solid var(--hairline);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            line-height: 1.5;
+            scrollbar-width: thin;
+            scrollbar-color: var(--ash) transparent;
+        }
+        .panel.open { transform: translateX(0); }
+        .panel::-webkit-scrollbar { width: 6px; }
+        .panel::-webkit-scrollbar-track { background: transparent; }
+        .panel::-webkit-scrollbar-thumb { background: var(--ash); }
+
+        .panel-close {
+            position: absolute;
+            top: 24px;
+            right: 24px;
+            background: none;
+            border: 1px solid var(--hairline);
+            color: var(--mute);
+            width: 28px;
+            height: 28px;
+            font: 500 16px/1 var(--font-mono);
+            cursor: pointer;
+            padding: 0;
+            border-radius: var(--r-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+            z-index: 1;
+        }
+        .panel-close:hover {
+            color: var(--ink);
+            border-color: var(--hairline-strong);
+            background: var(--surface-card);
+        }
+
+        .panel section {
+            margin-bottom: var(--xxl);
+            padding-bottom: var(--lg);
+            border-bottom: 1px solid var(--hairline);
+        }
+        .panel section:last-child { border-bottom: none; }
+
+        .panel h3 {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--ink);
+            margin: 0 0 var(--lg) 0;
+            letter-spacing: 0;
+            text-transform: none;
+        }
+
+        .ctrl {
+            margin-bottom: var(--lg);
+            font-size: 14px;
+            color: var(--body);
+            letter-spacing: 0;
+            text-transform: none;
+        }
+        .ctrl-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: var(--sm);
+            color: var(--ink);
+            gap: var(--md);
+        }
+        .ctrl-value {
+            color: var(--ink);
+            font-family: var(--font-mono);
+            font-weight: 500;
+        }
+
+        /* Range: 1px line track, 12px ink-fill square thumb (no radius) */
+        .ctrl input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 1px;
+            background: var(--hairline-strong);
+            outline: none;
+            margin: 4px 0 0;
+        }
+        .ctrl input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px;
+            height: 12px;
+            border-radius: 0;
+            background: var(--ink);
+            cursor: pointer;
+            border: none;
+        }
+        .ctrl input[type=range]::-moz-range-thumb {
+            width: 12px;
+            height: 12px;
+            border: none;
+            border-radius: 0;
+            background: var(--ink);
+            cursor: pointer;
+        }
+
+        /* Select: text-input style — soft surface, hairline, 4px radius */
+        .ctrl select {
+            background: var(--surface-soft);
+            color: var(--ink);
+            border: 1px solid var(--hairline);
+            padding: 6px 10px;
+            font: 400 13px var(--font-mono);
+            letter-spacing: 0;
+            cursor: pointer;
+            border-radius: var(--r-sm);
+            outline: none;
+        }
+        .ctrl select:focus {
+            background: var(--canvas);
+            border-color: var(--ink);
+        }
+        .ctrl select option {
+            background: var(--canvas);
+            color: var(--ink);
+        }
+
+        /* Toggle: pure-ASCII `[ ]` / `[x]` text indicator */
+        .ctrl-toggle {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            color: var(--ink);
+        }
+        .ctrl-toggle input { display: none; }
+        .ctrl-toggle .dot {
+            display: inline-block;
+            width: auto;
+            height: auto;
+            background: none;
+            border-radius: 0;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            color: var(--mute);
+            transition: color 0.12s ease;
+        }
+        .ctrl-toggle .dot::before { content: '[ ]'; }
+        .ctrl-toggle .dot::after { content: ''; }
+        .ctrl-toggle input:checked + .dot {
+            color: var(--ink);
+        }
+        .ctrl-toggle input:checked + .dot::before { content: '[x]'; }
+
+        /* Buttons inside the panel: ink-fill primary style */
+        .ctrl-button {
+            background: var(--ink);
+            border: 1px solid var(--ink);
+            color: var(--on-dark);
+            padding: 8px 16px;
+            font: 500 13px/2 var(--font-mono);
+            text-transform: none;
+            letter-spacing: 0;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 6px;
+            border-radius: var(--r-sm);
+            transition: background 0.15s ease;
+        }
+        .ctrl-button:hover { background: var(--ink-deep); }
+
+        /* Color swatch: small rect, hairline border */
+        .ctrl input[type=color] {
+            width: 36px;
+            height: 18px;
+            border: 1px solid var(--hairline-strong);
+            background: none;
+            padding: 0;
+            cursor: pointer;
+            border-radius: var(--r-sm);
+        }
+        .ctrl input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+        .ctrl input[type=color]::-webkit-color-swatch { border: none; }
+
+        .ctrl.has-tip { cursor: help; }
+
+        /* ============================================================
+           TOOLTIP — cream card, hairline border, ink mono text
+           ============================================================ */
+
+        .tooltip {
+            position: fixed;
+            z-index: 100;
+            background: var(--canvas);
+            border: 1px solid var(--hairline-strong);
+            color: var(--ink);
+            padding: var(--md) var(--lg);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 400;
+            letter-spacing: 0;
+            text-transform: none;
+            line-height: 1.5;
+            max-width: 280px;
+            pointer-events: none;
+            opacity: 0;
+            transform: translateX(-4px);
+            transition: opacity 0.14s ease, transform 0.14s ease;
+            border-radius: var(--r-sm);
+        }
+        .tooltip.visible {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        /* ============================================================
+           SOURCE OVERLAY — opencode cream "manpage" surface
+           ============================================================ */
+
+        .overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: var(--xxl);
+            background: var(--canvas);
+            color: var(--ink);
+            z-index: 10;
+            transition: opacity 0.4s ease;
+            padding: var(--xxl);
+        }
+        .overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .overlay h1 {
+            font-family: var(--font-mono);
+            font-size: 38px;
+            font-weight: 700;
+            line-height: 1.5;
+            letter-spacing: 0;
+            margin: 0;
+            color: var(--ink);
+            text-transform: none;
+        }
+
+        .overlay p {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0;
+            color: var(--body);
+            margin: 0;
+            max-width: 480px;
+            text-align: center;
+            line-height: 1.6;
+            text-transform: none;
+        }
+
+        /* Source list — opencode list-row with [+] bracket markers */
+        .source-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            width: 480px;
+            max-width: 88vw;
+            border-top: 1px solid var(--hairline);
+            border-bottom: 1px solid var(--hairline);
+        }
+
+        .src-btn {
+            background: none;
+            border: none;
+            border-bottom: 1px solid var(--hairline);
+            color: var(--ink);
+            font-family: var(--font-mono);
+            text-align: left;
+            padding: var(--md) 0;
+            cursor: pointer;
+            display: grid;
+            grid-template-columns: 28px 1fr;
+            grid-template-rows: auto auto;
+            column-gap: var(--sm);
+            row-gap: 2px;
+            transition: color 0.15s ease;
+        }
+        .src-btn:last-child { border-bottom: none; }
+        .src-btn[hidden] { display: none; }
+        .src-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .src-btn:not(:disabled):hover .src-name { color: var(--ink-deep); }
+
+        .src-btn::before {
+            content: '[+]';
+            grid-row: 1 / span 2;
+            color: var(--mute);
+            font-weight: 500;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .src-btn:not(:disabled):hover::before { color: var(--ink); }
+
+        .src-btn .src-name {
+            grid-column: 2;
+            grid-row: 1;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--ink);
+            letter-spacing: 0;
+            text-transform: none;
+        }
+        .src-btn .src-hint {
+            grid-column: 2;
+            grid-row: 2;
+            font-size: 13px;
+            color: var(--mute);
+            letter-spacing: 0;
+            text-transform: none;
+            line-height: 1.5;
+        }
+
+        .overlay-hint {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            letter-spacing: 0;
+            text-transform: none;
+            color: var(--mute);
+            max-width: 480px;
+            text-align: center;
+            min-height: 18px;
+            line-height: 1.6;
+        }
+        .overlay-hint.error { color: var(--danger); }
+
+        /* ============================================================
+           DEVICE PICKER — same opencode list-row pattern
+           ============================================================ */
+
+        .device-picker {
+            width: 520px;
+            max-width: 88vw;
+            display: flex;
+            flex-direction: column;
+            gap: var(--lg);
+        }
+        .device-picker[hidden] { display: none; }
+
+        .device-picker-header {
+            display: flex;
+            align-items: center;
+            gap: var(--lg);
+            padding-bottom: var(--md);
+            border-bottom: 1px solid var(--hairline);
+        }
+        .device-picker-title {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0;
+            text-transform: none;
+            color: var(--ink);
+        }
+        .device-back {
+            background: var(--canvas);
+            border: 1px solid var(--hairline-strong);
+            color: var(--ink);
+            font: 500 13px/2 var(--font-mono);
+            letter-spacing: 0;
+            text-transform: none;
+            padding: 2px 16px;
+            cursor: pointer;
+            border-radius: var(--r-sm);
+        }
+        .device-back:hover { background: var(--surface-card); }
+
+        .device-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            max-height: 50vh;
+            overflow-y: auto;
+            border-top: 1px solid var(--hairline);
+            border-bottom: 1px solid var(--hairline);
+        }
+        .device-item {
+            background: none;
+            border: none;
+            border-bottom: 1px solid var(--hairline);
+            color: var(--ink);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0;
+            text-transform: none;
+            text-align: left;
+            padding: var(--md) 0 var(--md) var(--xxl);
+            cursor: pointer;
+            position: relative;
+            transition: color 0.15s ease;
+        }
+        .device-item::before {
+            content: '[+]';
+            position: absolute;
+            left: 0;
+            top: var(--md);
+            color: var(--mute);
+            font-weight: 500;
+        }
+        .device-item:last-child { border-bottom: none; }
+        .device-item:hover { color: var(--ink-deep); }
+        .device-item:hover::before { color: var(--ink); }
+        .device-item.active::before { content: '[x]'; color: var(--ink); }
+        .device-item.active { color: var(--ink); font-weight: 500; }
+
+        .device-picker-foot {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            letter-spacing: 0;
+            text-transform: none;
+            color: var(--mute);
+            line-height: 1.6;
+            text-align: center;
+            padding-top: var(--md);
+            border-top: 1px solid var(--hairline);
+        }
+        .device-picker-foot a {
+            color: var(--ink);
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+        .device-picker-foot a:hover { color: var(--ink-deep); }
+    </style>
+</head>
+<body>
+    <canvas></canvas>
+    <div class="filter-overlay" id="filter-overlay" data-filter="NONE"></div>
+
+    <!-- SVG displacement-map filters applied to canvas via CSS filter:url(#…)
+         Every <feTurbulence>, <feDisplacementMap>, <feGaussianBlur> has an
+         id so JS can patch its attributes live from the panel knobs. -->
+    <svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true">
+        <defs>
+            <filter id="reeded-glass" x="-5%" y="-5%" width="110%" height="110%">
+                <feTurbulence id="reeded-turb" type="turbulence" baseFrequency="0.02 0.0005" numOctaves="2" seed="2" result="noise"/>
+                <feDisplacementMap id="reeded-disp" in="SourceGraphic" in2="noise" scale="70" xChannelSelector="R" yChannelSelector="G" result="disp"/>
+                <feGaussianBlur id="reeded-blur" in="disp" stdDeviation="0"/>
+            </filter>
+            <filter id="ripple-glass" x="-5%" y="-5%" width="110%" height="110%">
+                <feTurbulence id="ripple-turb" type="fractalNoise" baseFrequency="0.018 0.018" numOctaves="3" seed="5" result="noise"/>
+                <feDisplacementMap id="ripple-disp" in="SourceGraphic" in2="noise" scale="25" xChannelSelector="R" yChannelSelector="G" result="disp"/>
+                <feGaussianBlur id="ripple-blur" in="disp" stdDeviation="0"/>
+            </filter>
+            <filter id="pebbled-glass" x="-5%" y="-5%" width="110%" height="110%">
+                <feTurbulence id="pebbled-turb" type="fractalNoise" baseFrequency="0.05 0.05" numOctaves="2" seed="7" result="noise"/>
+                <feDisplacementMap id="pebbled-disp" in="SourceGraphic" in2="noise" scale="14" xChannelSelector="R" yChannelSelector="G" result="disp"/>
+                <feGaussianBlur id="pebbled-blur" in="disp" stdDeviation="0"/>
+            </filter>
+            <filter id="diamond-glass" x="-5%" y="-5%" width="110%" height="110%">
+                <feTurbulence id="diamond-turb" type="turbulence" baseFrequency="0.05 0.05" numOctaves="1" seed="11" result="noise"/>
+                <feDisplacementMap id="diamond-disp" in="SourceGraphic" in2="noise" scale="22" xChannelSelector="R" yChannelSelector="G" result="disp"/>
+                <feGaussianBlur id="diamond-blur" in="disp" stdDeviation="0"/>
+            </filter>
+            <filter id="molten-glass" x="-5%" y="-5%" width="110%" height="110%">
+                <feTurbulence id="molten-turb" type="fractalNoise" baseFrequency="0.005 0.005" numOctaves="1" seed="13" result="noise"/>
+                <feDisplacementMap id="molten-disp" in="SourceGraphic" in2="noise" scale="100" xChannelSelector="R" yChannelSelector="G" result="disp"/>
+                <feGaussianBlur id="molten-blur" in="disp" stdDeviation="2"/>
+            </filter>
+        </defs>
+    </svg>
+
+    <div class="ui">
+        <div class="title">SWIRL</div>
+        <button class="panel-toggle" id="panel-toggle">Settings</button>
+
+        <div class="modes">
+            <button data-mode="DEFAULT">Default</button>
+            <button data-mode="SMOKE" class="active">Smoke</button>
+            <button data-mode="INK">Ink</button>
+            <button data-mode="RAINBOW">Rainbow</button>
+            <button data-mode="AQUA">Aqua</button>
+        </div>
+
+        <div class="filters">
+            <button data-filter="NONE" class="active">None</button>
+            <button data-filter="FROST">Frost</button>
+            <button data-filter="DREAM">Dream</button>
+            <button data-filter="GRAIN">Grain</button>
+            <button data-filter="VIGNETTE">Vignette</button>
+            <button data-filter="HALFTONE">Halftone</button>
+            <button data-filter="REEDED">Reeded</button>
+            <button data-filter="RIPPLE">Ripple</button>
+            <button data-filter="PEBBLED">Pebbled</button>
+            <button data-filter="DIAMOND">Diamond</button>
+            <button data-filter="MOLTEN">Molten</button>
+        </div>
+
+        <div class="footer-left">52&deg;30'N 13&deg;24'E</div>
+        <div class="footer-center">+ 2026</div>
+        <div class="mic-status">
+            <span id="mic-label">OFF</span>
+            <span class="mic-dot" id="mic-dot"></span>
+        </div>
+
+        <pre class="debug" id="debug"></pre>
+    </div>
+
+    <aside class="panel" id="panel">
+        <button class="panel-close" id="panel-close" type="button" aria-label="Close settings panel">&times;</button>
+    </aside>
+
+    <div class="overlay hidden" id="overlay">
+        <h1>SWIRL</h1>
+        <p>Audio-reactive fluid simulation. Enable your microphone to begin.</p>
+        <div class="source-buttons">
+            <button class="src-btn" data-source="mic">
+                <span class="src-name">Microphone</span>
+                <span class="src-hint">Use the default system microphone</span>
+            </button>
+            <!-- Temporarily hidden: other input sources. Remove `hidden` to bring back. -->
+            <button class="src-btn" data-source="display" hidden>
+                <span class="src-name">Browser tab / system audio</span>
+                <span class="src-hint">Pick a tab or share your screen with audio</span>
+            </button>
+            <button class="src-btn" data-source="file" hidden>
+                <span class="src-name">Audio file</span>
+                <span class="src-hint">MP3, WAV, OGG &mdash; plays on loop</span>
+            </button>
+        </div>
+        <input type="file" id="file-input" accept="audio/*" hidden>
+
+        <div class="device-picker" id="device-picker" hidden>
+            <div class="device-picker-header">
+                <button class="device-back" id="device-back">[&larr;] Back</button>
+                <span class="device-picker-title">Choose audio input</span>
+            </div>
+            <div class="device-list" id="device-list"></div>
+            <div class="device-picker-foot">
+                Don&apos;t see your app? Install a virtual audio cable<br>
+                (<a href="https://vb-audio.com/Cable/" target="_blank" rel="noopener">VB-Cable</a> on Windows,
+                <a href="https://github.com/ExistentialAudio/BlackHole" target="_blank" rel="noopener">BlackHole</a> on macOS)
+                and route the app to it.
+            </div>
+        </div>
+
+        <div class="overlay-hint" id="overlay-hint"></div>
+    </div>
+
+    <script src="./script.js"></script>
+</body>
+</html>

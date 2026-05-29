@@ -1,0 +1,17 @@
+# Reference video — large binary, not part of the project
+Instagram.mp4
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local dev artefacts
+node_modules/
+.cache/
