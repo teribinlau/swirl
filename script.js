@@ -2747,6 +2747,17 @@ window.addEventListener('DOMContentLoaded', () => {
     // pickSource() re-shows the overlay only if mic start fails.
     pickSource('mic');
 
+    // Safety net: if the mic hasn't started within 3s (browser silently
+    // blocked the prompt, or HTTPS not available, or user dismissed it),
+    // surface the overlay so they can click Microphone to retry manually.
+    setTimeout(() => {
+        const audio = window.__audio;
+        if (!audio || !audio.ready) {
+            overlay.classList.remove('hidden');
+            setHint('Microphone didn\'t start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed.');
+        }
+    }, 3000);
+
     // Optional debug HUD — press D to toggle
     const debugEl = document.getElementById('debug');
     function drawDebug () {
