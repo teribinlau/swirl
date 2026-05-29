@@ -1940,9 +1940,28 @@ function applyAudioInputs (audio) {
         if (isAqua) {
             // Bubble radius: small when quiet, medium when loud
             config.SPLAT_RADIUS = origRadius * (0.6 + e * 0.5 + audio.smoothedVolume * 0.3);
-        } else if (isRain) {
-            // Raindrop size: tiny when quiet, larger drops when loud
-            config.SPLAT_RADIUS = origRadius * (0.5 + e * 0.8 + audio.smoothedVolume * 0.4);
+            splat(pt.x, pt.y, dx, dy, color);
+            continue;
+        }
+        if (isRain) {
+            // True ring ripple: N splats arranged in a circle around the impact
+            // point, each pushing radially OUTWARD. This is what creates the
+            // visible concentric expanding ring instead of a single splotch.
+            const RING_COUNT = 8;
+            const ringRadius = 0.022 + e * 0.028 + audio.smoothedVolume * 0.02;
+            // Per-ring-point splat is small so dots merge into a ring rather
+            // than appearing as 8 discrete blobs.
+            config.SPLAT_RADIUS = origRadius * (0.45 + e * 0.35);
+            // Ring force is independent of trajectory dx/dy — purely radial.
+            const ringForce = e * AUDIO.SPLAT_FORCE * 0.28 * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
+            const phase = Math.random() * Math.PI * 2;   // rotate ring randomly each drop
+            for (let k = 0; k < RING_COUNT; k++) {
+                const a = phase + (k / RING_COUNT) * Math.PI * 2;
+                const ca = Math.cos(a), sa = Math.sin(a);
+                splat(pt.x + ca * ringRadius, pt.y + sa * ringRadius,
+                      ca * ringForce, sa * ringForce, color);
+            }
+            continue;
         }
         splat(pt.x, pt.y, dx, dy, color);
     }
@@ -1960,30 +1979,43 @@ function applyAudioInputs (audio) {
 // blows out the screen on loud beats.
 function audioBurst (amount, audio, gain) {
     const isAqua = currentTrajectory === 'AQUA';
+    const isRain = currentTrajectory === 'RAIN';
+    const origRadius = config.SPLAT_RADIUS;
     for (let i = 0; i < amount; i++) {
-        let x, y, dx, dy;
-        const f = AUDIO.SPLAT_FORCE * 1.6 * (0.4 + audio.smoothedVolume);
-        if (isAqua) {
-            // Burst spawns at random x along the bottom, every jet straight up
-            x = Math.random();
-            y = 0.02;
-            dx = 0;
-            dy = f;
-        } else {
-            x = Math.random();
-            y = Math.random();
-            const ang = Math.random() * Math.PI * 2;
-            dx = Math.cos(ang) * f;
-            dy = Math.sin(ang) * f;
-        }
         // Bursts are inherently punchier — push the energy term up,
         // but still through softColor so brightness can never exceed gain×1.4
         const intensity = softColor(0.8 + audio.smoothedVolume, gain * 1.4, AUDIO.COLOR_KNEE);
         // No band index — paletteColor falls back to random in FULL mode,
         // single-hue jitter in SINGLE, greyscale in MONO.
         const color = paletteColor(null, intensity);
-        splat(x, y, dx, dy, color);
+        const f = AUDIO.SPLAT_FORCE * 1.6 * (0.4 + audio.smoothedVolume);
+
+        if (isAqua) {
+            // Burst spawns at random x along the bottom, every jet straight up
+            splat(Math.random(), 0.02, 0, f, color);
+            continue;
+        }
+        if (isRain) {
+            // Burst raindrop = a single, larger ring ripple at a random spot
+            const cx = Math.random(), cy = Math.random();
+            const RING_COUNT = 10;
+            const ringRadius = 0.035 + audio.smoothedVolume * 0.025;
+            config.SPLAT_RADIUS = origRadius * 0.55;
+            const ringForce = f * 0.25;
+            const phase = Math.random() * Math.PI * 2;
+            for (let k = 0; k < RING_COUNT; k++) {
+                const a = phase + (k / RING_COUNT) * Math.PI * 2;
+                const ca = Math.cos(a), sa = Math.sin(a);
+                splat(cx + ca * ringRadius, cy + sa * ringRadius,
+                      ca * ringForce, sa * ringForce, color);
+            }
+            continue;
+        }
+        // Default: random scatter in random direction
+        const ang = Math.random() * Math.PI * 2;
+        splat(Math.random(), Math.random(), Math.cos(ang) * f, Math.sin(ang) * f, color);
     }
+    if (isRain) config.SPLAT_RADIUS = origRadius;
 }
 
 // ============================================================
@@ -2062,14 +2094,14 @@ const PRESETS = {
     RAIN: {
         _trajectory: 'RAIN',           // behavioural preset — random raindrop impacts
         _palette: { mode: 'MONO' },    // greyscale raindrops on dark water surface
-        DENSITY_DISSIPATION: 1.3,      // ripples linger long enough to be visible
-        VELOCITY_DISSIPATION: 1.5,     // strong damping — impacts stop fast, water settles
-        PRESSURE: 0.9,                 // high — incompressible water surface feel
-        CURL: 35,                      // high curl spins each impact into ring-like swirl
-        SPLAT_RADIUS: 0.10,            // tiny droplets (modulated bigger when loud)
+        DENSITY_DISSIPATION: 1.4,      // ripple ink fades after the ring expands
+        VELOCITY_DISSIPATION: 0.7,     // low damping — let the ring keep expanding outward
+        PRESSURE: 0.85,                // mid — incompressible water-surface feel
+        CURL: 5,                       // very low — clean radial expansion, no swirl
+        SPLAT_RADIUS: 0.10,            // base; ring uses ~45% of this per point
         BLOOM: true,
-        BLOOM_INTENSITY: 0.65,
-        BLOOM_THRESHOLD: 0.5,
+        BLOOM_INTENSITY: 0.55,
+        BLOOM_THRESHOLD: 0.55,
         SUNRAYS: false,
         SUNRAYS_WEIGHT: 0.5,
         SHADING: true,
