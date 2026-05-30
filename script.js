@@ -1071,7 +1071,6 @@ function update () {
     const dt = calcDeltaTime();
     if (resizeCanvas())
         initFramebuffers();
-    updateColors(dt);
     applyInputs();
     if (!config.PAUSED)
         step(dt);
@@ -1096,11 +1095,6 @@ function resizeCanvas () {
         return true;
     }
     return false;
-}
-
-function updateColors (dt) {
-    // Pointer-based colorful rotation removed; colors are now driven
-    // per-splat by the audio frequency band hue mapping.
 }
 
 function applyInputs () {
