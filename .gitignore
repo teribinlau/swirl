@@ -15,3 +15,10 @@ desktop.ini
 # Local dev artefacts
 node_modules/
 .cache/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
