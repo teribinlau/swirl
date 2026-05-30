@@ -1468,12 +1468,13 @@ class AudioAnalyzer {
         this.binToHz = 0;
         this.bandBinRanges = []; // [{lo, hi}] for each band
 
-        // Active source state
-        this.currentSourceNode = null;   // AudioNode currently feeding analyser
-        this.currentStream = null;       // MediaStream for mic/display
-        this.currentMediaEl = null;      // HTMLAudioElement for file/URL
-        this.sourceLabel = '';           // 'MIC' / 'TAB' / 'FILE' / etc.
-        this.onSourceEnded = null;       // callback for stream-ended events
+        // Multi-source mixer state. Each source feeds the analyser through its
+        // own GainNode (a fader); all gains sum into mixBus -> analyser.
+        this.sources = [];               // [{ id, kind, label, node, gain, stream, mediaEl, muted, level }]
+        this.mixBus = null;              // GainNode summing every source into the analyser
+        this._nextSourceId = 1;
+        this.currentDeviceId = null;     // last mic device added (for device-picker highlight)
+        this.onSourcesChanged = null;    // UI callback: a source was added / removed / ended
     }
 
     async _ensureContext () {
@@ -1488,6 +1489,9 @@ class AudioAnalyzer {
         this.analyser = this.ctx.createAnalyser();
         this.analyser.fftSize = 2048;
         this.analyser.smoothingTimeConstant = 0.7;
+        // Mixer bus: every source's gain connects here; this feeds the analyser.
+        this.mixBus = this.ctx.createGain();
+        this.mixBus.connect(this.analyser);
         const binCount = this.analyser.frequencyBinCount;
         this.freqData = new Uint8Array(binCount);
         this.timeData = new Uint8Array(this.analyser.fftSize);
@@ -1500,33 +1504,66 @@ class AudioAnalyzer {
         }
     }
 
-    _teardownCurrentSource () {
-        if (this.currentSourceNode) {
-            try { this.currentSourceNode.disconnect(); } catch (e) {}
-            this.currentSourceNode = null;
-        }
-        if (this.currentStream) {
-            this.currentStream.getTracks().forEach(t => t.stop());
-            this.currentStream = null;
-        }
-        if (this.currentMediaEl) {
-            this.currentMediaEl.pause();
-            try { URL.revokeObjectURL(this.currentMediaEl.src); } catch (e) {}
-            this.currentMediaEl = null;
-        }
-        // Reset transient state so the visual doesn't jump
-        this.fluxHistory.length = 0;
-        if (this.prevSpectrum) this.prevSpectrum.fill(0);
-    }
-
-    _attachSource (sourceNode, label) {
-        sourceNode.connect(this.analyser);
-        this.currentSourceNode = sourceNode;
-        this.sourceLabel = label;
+    // Wire a new source into the mixer: node -> per-source gain -> mixBus.
+    _registerSource ({ kind, node, label, stream = null, mediaEl = null, toDestination = false }) {
+        const gain = this.ctx.createGain();
+        node.connect(gain);
+        gain.connect(this.mixBus);
+        // File playback must also reach the speakers; mic / system must NOT
+        // (routing those to the output would feed back / echo).
+        if (toDestination) gain.connect(this.ctx.destination);
+        const src = {
+            id: this._nextSourceId++,
+            kind, node, gain, stream, mediaEl, label,
+            muted: false, level: 1,
+        };
+        this.sources.push(src);
         this.ready = true;
+        if (this.onSourcesChanged) this.onSourcesChanged();
+        return src;
     }
 
-    async startFromMicrophone (deviceId) {
+    removeSource (id) {
+        const i = this.sources.findIndex(s => s.id === id);
+        if (i === -1) return;
+        const s = this.sources[i];
+        try { s.node.disconnect(); } catch (e) {}
+        try { s.gain.disconnect(); } catch (e) {}
+        if (s.stream) s.stream.getTracks().forEach(t => t.stop());
+        if (s.mediaEl) {
+            s.mediaEl.pause();
+            try { URL.revokeObjectURL(s.mediaEl.src); } catch (e) {}
+        }
+        this.sources.splice(i, 1);
+        if (this.sources.length === 0) {
+            this.ready = false;
+            // Reset transient state so the next source doesn't inherit old flux
+            this.fluxHistory.length = 0;
+            if (this.prevSpectrum) this.prevSpectrum.fill(0);
+        }
+        if (this.onSourcesChanged) this.onSourcesChanged();
+    }
+
+    setSourceLevel (id, level) {
+        const s = this.sources.find(s => s.id === id);
+        if (!s) return;
+        s.level = level;
+        if (!s.muted) s.gain.gain.value = level;
+    }
+
+    setSourceMuted (id, muted) {
+        const s = this.sources.find(s => s.id === id);
+        if (!s) return;
+        s.muted = muted;
+        s.gain.gain.value = muted ? 0 : s.level;
+    }
+
+    // A stream track ended on its own (mic unplugged, screen-share stopped).
+    _onSourceTrackEnded (id) {
+        this.removeSource(id);
+    }
+
+    async addMicrophone (deviceId) {
         // Fail fast with a precise reason BEFORE touching getUserMedia, so the
         // UI can tell file:// apart from an in-app webview apart from a real
         // permission denial — instead of a generic "didn't start".
@@ -1537,6 +1574,7 @@ class AudioAnalyzer {
             throw new Error('NO_MEDIA_DEVICES');       // in-app webview / unsupported browser
         }
         await this._ensureContext();
+        this._initAnalyserOnce();
         const audioConstraints = {
             echoCancellation: false,
             noiseSuppression: false,
@@ -1544,18 +1582,16 @@ class AudioAnalyzer {
         };
         if (deviceId) audioConstraints.deviceId = { exact: deviceId };
         const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-        this._teardownCurrentSource();
-        this._initAnalyserOnce();
-        this.currentStream = stream;
         this.currentDeviceId = deviceId || (stream.getAudioTracks()[0].getSettings().deviceId);
-        const source = this.ctx.createMediaStreamSource(stream);
-        stream.getAudioTracks().forEach(t => {
-            t.onended = () => { this.ready = false; if (this.onSourceEnded) this.onSourceEnded('mic'); };
-        });
+        const node = this.ctx.createMediaStreamSource(stream);
         // Pick a friendlier label from the device's actual name if available
         const trackLabel = stream.getAudioTracks()[0].label;
         const label = trackLabel ? trackLabel.toUpperCase().slice(0, 24) : 'MIC';
-        this._attachSource(source, label);
+        const src = this._registerSource({ kind: 'mic', node, label, stream });
+        stream.getAudioTracks().forEach(t => {
+            t.onended = () => this._onSourceTrackEnded(src.id);
+        });
+        return src;
     }
 
     // Enumerate all audio input devices. Browsers hide device labels until
@@ -1584,11 +1620,12 @@ class AudioAnalyzer {
         }
     }
 
-    async startFromDisplay () {
-        if (!navigator.mediaDevices.getDisplayMedia) {
+    async addDisplay () {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
             throw new Error('UNSUPPORTED');
         }
         await this._ensureContext();
+        this._initAnalyserOnce();
         const stream = await navigator.mediaDevices.getDisplayMedia({
             video: true,            // required by spec even though we only want audio
             audio: true,
@@ -1599,34 +1636,30 @@ class AudioAnalyzer {
             stream.getTracks().forEach(t => t.stop());
             throw new Error('NO_AUDIO_TRACK');
         }
-        this._teardownCurrentSource();
-        this._initAnalyserOnce();
-        this.currentStream = stream;
-        const source = this.ctx.createMediaStreamSource(stream);
+        const node = this.ctx.createMediaStreamSource(stream);
+        const src = this._registerSource({ kind: 'display', node, label: 'SYSTEM', stream });
         stream.getAudioTracks().forEach(t => {
-            t.onended = () => { this.ready = false; if (this.onSourceEnded) this.onSourceEnded('display'); };
+            t.onended = () => this._onSourceTrackEnded(src.id);
         });
-        this._attachSource(source, 'TAB');
+        return src;
     }
 
-    async startFromFile (file) {
+    async addFile (file) {
         await this._ensureContext();
+        this._initAnalyserOnce();
         const url = URL.createObjectURL(file);
         const audioEl = new Audio();
         audioEl.src = url;
         audioEl.loop = true;
         audioEl.crossOrigin = 'anonymous';
-        const source = this.ctx.createMediaElementSource(audioEl);
-        // Route to both analyser AND speakers — MediaElementSource hijacks default routing
-        source.connect(this.ctx.destination);
+        const node = this.ctx.createMediaElementSource(audioEl);
         await audioEl.play();
-        this._teardownCurrentSource();
-        this._initAnalyserOnce();
-        this.currentMediaEl = audioEl;
-        audioEl.addEventListener('ended', () => {
-            if (this.onSourceEnded) this.onSourceEnded('file');
+        // toDestination: file audio is also sent to the speakers (mic/system aren't)
+        const src = this._registerSource({
+            kind: 'file', node, label: 'FILE: ' + (file.name || 'audio'),
+            mediaEl: audioEl, toDestination: true,
         });
-        this._attachSource(source, 'FILE: ' + (file.name || 'audio'));
+        return src;
     }
 
     tick () {
@@ -2228,10 +2261,21 @@ const STRINGS = {
             '麦克风权限已被阻止。请点击地址栏的 🔒 / 摄像头图标,把"麦克风"设为"允许",然后刷新页面。',
         'Tap the Microphone button below to start — the browser only turns the mic on after you tap.':
             '请点击下方的"麦克风"按钮开始 —— 浏览器只有在你点击之后才会开启麦克风。',
+        // ── Mixer ───────────────────────────────────────────────
+        'Sources': '音源',
+        '+ Mic': '+ 麦克风',
+        '+ System': '+ 系统',
+        '+ File': '+ 文件',
+        'No sources yet.': '还没有音源。',
+        'Mute': '静音',
+        'Remove': '移除',
+        'All sources removed. Add one to begin.': '已移除全部音源。添加一个即可开始。',
         'No microphone found. Connect one and click Microphone to retry.':
             '未找到麦克风。请接入麦克风后,点击"麦克风"重试。',
         'The microphone is in use by another app. Close it and click Microphone to retry.':
             '麦克风正被其他应用占用。请关闭该应用后,点击"麦克风"重试。',
+        'This browser can’t capture live mic / system audio (common in embedded preview browsers). Add an audio File instead, or open the page in Chrome / Edge / Safari.':
+            '此浏览器无法捕获实时麦克风 / 系统音频(内置预览浏览器常见)。请改用"文件"音源,或在 Chrome / Edge / Safari 中打开本页。',
         'That device is no longer available. Pick another.': '此设备不再可用。请选择其他设备。',
         'Failed to start source. See console for details.': '源启动失败。详情请查看控制台。',
         "Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed.":
@@ -2439,6 +2483,8 @@ function applyLanguage () {
         buildSettingsPanel();
         if (typeof refreshPanel === 'function') refreshPanel();
     }
+    // Re-render the mixer so its labels (Sources / Mute / add buttons) re-translate
+    if (window.__renderMixer) window.__renderMixer();
     // Highlight active lang option
     document.querySelectorAll('.lang-opt').forEach(b => {
         b.classList.toggle('active', b.dataset.lang === currentLang);
@@ -2699,8 +2745,9 @@ function bindTooltip (el, text) {
 function buildSettingsPanel () {
     const panel = document.getElementById('panel');
     if (!panel) return;
-    // Only remove schema-built sections; leave the close button alone
-    panel.querySelectorAll('section').forEach(s => s.remove());
+    // Only remove schema-built sections; leave the close button and the
+    // dynamically-managed mixer section alone.
+    panel.querySelectorAll('section:not(#mixer-section)').forEach(s => s.remove());
     PANEL_SCHEMA.forEach(section => {
         const sec = document.createElement('section');
         const h = document.createElement('h3');
@@ -3024,11 +3071,14 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function reflectActiveSource (label) {
-        if (label) {
+    function reflectActiveSource () {
+        const audio = window.__audio;
+        const n = audio ? audio.sources.length : 0;
+        if (n > 0) {
             micDot.classList.add('active');
             micLabel.removeAttribute('data-off');
-            micLabel.textContent = label;
+            const first = audio.sources[0].label;
+            micLabel.textContent = n > 1 ? `${first} +${n - 1}` : first;
         } else {
             micDot.classList.remove('active');
             // data-off marker lets applyLanguage() re-translate this on toggle
@@ -3037,14 +3087,120 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // Build / refresh the SOURCES mixer pinned at the top of the settings panel.
+    // Sources come and go at runtime, so this rebuilds its rows on each change.
+    function renderMixer () {
+        const panel = document.getElementById('panel');
+        if (!panel) return;
+        let sec = document.getElementById('mixer-section');
+        if (!sec) {
+            sec = document.createElement('section');
+            sec.id = 'mixer-section';
+            const closeBtn = panel.querySelector('.panel-close');
+            panel.insertBefore(sec, closeBtn ? closeBtn.nextSibling : panel.firstChild);
+        }
+        const audio = window.__audio;
+        const sources = audio ? audio.sources : [];
+        sec.innerHTML = '';
+
+        const h = document.createElement('h3');
+        h.textContent = t('Sources');
+        sec.appendChild(h);
+
+        // Add-source buttons
+        const add = document.createElement('div');
+        add.className = 'mixer-add';
+        const mkAdd = (label, kind, disabled) => {
+            const b = document.createElement('button');
+            b.className = 'mixer-add-btn';
+            b.textContent = label;
+            if (disabled) b.disabled = true;
+            b.addEventListener('click', () => {
+                if (kind === 'file') fileInput.click();
+                else pickSource(kind);
+            });
+            return b;
+        };
+        const noDisplay = !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia;
+        add.appendChild(mkAdd(t('+ Mic'), 'mic', false));
+        add.appendChild(mkAdd(t('+ System'), 'display', noDisplay));
+        add.appendChild(mkAdd(t('+ File'), 'file', false));
+        sec.appendChild(add);
+
+        if (sources.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'mixer-empty';
+            empty.textContent = t('No sources yet.');
+            sec.appendChild(empty);
+            return;
+        }
+
+        sources.forEach(s => {
+            const row = document.createElement('div');
+            row.className = 'mixer-row';
+
+            const top = document.createElement('div');
+            top.className = 'mixer-row-top';
+            const name = document.createElement('span');
+            name.className = 'mixer-name';
+            name.textContent = s.label;
+            const pct = document.createElement('span');
+            pct.className = 'mixer-pct';
+            pct.textContent = Math.round(s.level * 100) + '%';
+            top.appendChild(name);
+            top.appendChild(pct);
+            row.appendChild(top);
+
+            const ctrl = document.createElement('div');
+            ctrl.className = 'mixer-ctrl';
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.className = 'mixer-fader';
+            slider.min = '0'; slider.max = '2'; slider.step = '0.01';
+            slider.value = String(s.level);
+            slider.addEventListener('input', () => {
+                audio.setSourceLevel(s.id, +slider.value);
+                pct.textContent = Math.round(+slider.value * 100) + '%';
+            });
+
+            const mute = document.createElement('button');
+            mute.className = 'mixer-mute';
+            mute.textContent = 'M';
+            mute.title = t('Mute');
+            mute.classList.toggle('muted', s.muted);
+            mute.addEventListener('click', () => {
+                audio.setSourceMuted(s.id, !s.muted);
+                mute.classList.toggle('muted', s.muted);
+            });
+
+            const rm = document.createElement('button');
+            rm.className = 'mixer-remove';
+            rm.textContent = '✕';
+            rm.title = t('Remove');
+            rm.addEventListener('click', () => audio.removeSource(s.id));
+
+            ctrl.appendChild(slider);
+            ctrl.appendChild(mute);
+            ctrl.appendChild(rm);
+            row.appendChild(ctrl);
+            sec.appendChild(row);
+        });
+    }
+    window.__renderMixer = renderMixer;
+
     // Lazy singleton — created on first source selection, reused across switches
     function getAnalyzer () {
         if (!window.__audio) {
             window.__audio = new AudioAnalyzer();
-            window.__audio.onSourceEnded = (kind) => {
-                reflectActiveSource(null);
-                setHint(t('Source ended ({kind}). Pick another one.', { kind }));
-                showOverlay();
+            // Fires on every add / remove / auto-end — keep mixer + indicator in sync
+            window.__audio.onSourcesChanged = () => {
+                renderMixer();
+                reflectActiveSource();
+                if (window.__audio.sources.length === 0) {
+                    showOverlay();   // re-enables source buttons AND clears the hint…
+                    setHint(t('All sources removed. Add one to begin.'));  // …so set it after
+                }
             };
         }
         return window.__audio;
@@ -3061,14 +3217,15 @@ window.addEventListener('DOMContentLoaded', () => {
         const audio = getAnalyzer();
         try {
             if (kind === 'mic') {
-                await audio.startFromMicrophone(deviceId);
+                await audio.addMicrophone(deviceId);
             } else if (kind === 'display') {
-                await audio.startFromDisplay();
+                await audio.addDisplay();
             } else if (kind === 'file') {
-                await audio.startFromFile(file);
+                await audio.addFile(file);
             }
             overlay.classList.add('hidden');
-            reflectActiveSource(audio.sourceLabel);
+            renderMixer();
+            reflectActiveSource();
             setHint('');
         } catch (err) {
             console.error('Source error:', err);
@@ -3112,6 +3269,10 @@ window.addEventListener('DOMContentLoaded', () => {
             } else if (name === 'OverconstrainedError') {
                 setHint(t('That device is no longer available. Pick another.'), true);
                 showDevicePickerView();
+            } else if (name === 'NotSupportedError') {
+                // Common in embedded / preview / automation browsers with no
+                // real mic backend. File playback still works there.
+                setHint(t('This browser can’t capture live mic / system audio (common in embedded preview browsers). Add an audio File instead, or open the page in Chrome / Edge / Safari.'), true);
             } else {
                 setHint(t('Failed to start source. See console for details.'), true);
             }
@@ -3167,6 +3328,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // overlay. The browser shows its native permission prompt the first
     // time; returning users with permission granted just go straight in.
     // pickSource() re-shows the overlay only if mic start fails.
+    renderMixer();   // show the SOURCES panel section up-front (even before/if mic starts)
     pickSource('mic');
 
     // Safety net: if the mic hasn't started within 3s (browser silently

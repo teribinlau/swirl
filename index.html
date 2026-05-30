@@ -586,6 +586,112 @@
         .ctrl.has-tip { cursor: help; }
 
         /* ============================================================
+           SOURCES MIXER — multiple inputs, each with its own fader
+           ============================================================ */
+        #mixer-section .mixer-add {
+            display: flex;
+            gap: var(--xs);
+            margin-bottom: var(--lg);
+        }
+        .mixer-add-btn {
+            flex: 1;
+            background: var(--surface-soft);
+            border: 1px solid var(--hairline);
+            color: var(--ink);
+            padding: 6px 4px;
+            font: 500 12px var(--font-mono);
+            cursor: pointer;
+            border-radius: var(--r-sm);
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        }
+        .mixer-add-btn:hover:not(:disabled) {
+            background: var(--ink);
+            color: var(--on-dark);
+            border-color: var(--ink);
+        }
+        .mixer-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .mixer-empty {
+            font: 400 13px var(--font-mono);
+            color: var(--mute);
+        }
+
+        .mixer-row {
+            margin-bottom: var(--md);
+            padding-bottom: var(--md);
+            border-bottom: 1px solid var(--hairline);
+        }
+        .mixer-row:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+
+        .mixer-row-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: var(--sm);
+            margin-bottom: var(--sm);
+        }
+        .mixer-name {
+            color: var(--ink);
+            font: 500 13px var(--font-mono);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .mixer-pct {
+            color: var(--mute);
+            font: 400 12px var(--font-mono);
+            flex-shrink: 0;
+        }
+
+        .mixer-ctrl {
+            display: flex;
+            align-items: center;
+            gap: var(--sm);
+        }
+        /* Fader: same 1px line + 12px square ink thumb as the rest of the panel */
+        .mixer-fader {
+            -webkit-appearance: none;
+            appearance: none;
+            flex: 1;
+            height: 1px;
+            background: var(--hairline-strong);
+            outline: none;
+        }
+        .mixer-fader::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 12px; height: 12px;
+            border-radius: 0; border: none;
+            background: var(--ink);
+            cursor: pointer;
+        }
+        .mixer-fader::-moz-range-thumb {
+            width: 12px; height: 12px;
+            border-radius: 0; border: none;
+            background: var(--ink);
+            cursor: pointer;
+        }
+
+        .mixer-mute, .mixer-remove {
+            flex-shrink: 0;
+            width: 22px; height: 22px;
+            background: none;
+            border: 1px solid var(--hairline-strong);
+            color: var(--mute);
+            font: 500 12px var(--font-mono);
+            cursor: pointer;
+            border-radius: var(--r-sm);
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        }
+        .mixer-mute:hover { border-color: var(--ink); color: var(--ink); }
+        .mixer-mute.muted {
+            background: var(--danger);
+            border-color: var(--danger);
+            color: var(--on-dark);
+        }
+        .mixer-remove:hover { border-color: var(--danger); color: var(--danger); }
+
+        /* ============================================================
            TOOLTIP — cream card, hairline border, ink mono text
            ============================================================ */
 
@@ -927,12 +1033,12 @@
                 <span class="src-name" data-i18n="Microphone">Microphone</span>
                 <span class="src-hint" data-i18n="Use the default system microphone">Use the default system microphone</span>
             </button>
-            <!-- Temporarily hidden: other input sources. Remove `hidden` to bring back. -->
-            <button class="src-btn" data-source="display" hidden>
+            <!-- All inputs are addable; you can stack several (they mix). -->
+            <button class="src-btn" data-source="display">
                 <span class="src-name" data-i18n="Browser tab / system audio">Browser tab / system audio</span>
                 <span class="src-hint" data-i18n="Pick a tab or share your screen with audio">Pick a tab or share your screen with audio</span>
             </button>
-            <button class="src-btn" data-source="file" hidden>
+            <button class="src-btn" data-source="file">
                 <span class="src-name" data-i18n="Audio file">Audio file</span>
                 <span class="src-hint" data-i18n="MP3, WAV, OGG — plays on loop">MP3, WAV, OGG &mdash; plays on loop</span>
             </button>
