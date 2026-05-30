@@ -1527,6 +1527,15 @@ class AudioAnalyzer {
     }
 
     async startFromMicrophone (deviceId) {
+        // Fail fast with a precise reason BEFORE touching getUserMedia, so the
+        // UI can tell file:// apart from an in-app webview apart from a real
+        // permission denial — instead of a generic "didn't start".
+        if (!window.isSecureContext) {
+            throw new Error('INSECURE_CONTEXT');      // file:// or plain http (not localhost)
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error('NO_MEDIA_DEVICES');       // in-app webview / unsupported browser
+        }
         await this._ensureContext();
         const audioConstraints = {
             echoCancellation: false,
@@ -2211,6 +2220,18 @@ const STRINGS = {
         'This browser does not support tab / system audio capture.': '此浏览器不支持标签 / 系统音频捕获。',
         'No audio captured. Check "Share audio" when picking the source.': '未捕获到音频。选择源时请勾选"共享音频"。',
         'Permission denied. Allow access in your browser and try again.': '权限被拒绝。请在浏览器中允许访问后重试。',
+        'Microphone needs HTTPS or localhost. This page is on neither, so the browser blocks it. Open the HTTPS link or run a local server.':
+            '麦克风需要 HTTPS 或 localhost。本页两者都不是,所以被浏览器屏蔽。请打开 HTTPS 链接,或用本地服务器运行。',
+        'This browser blocks microphone access. If you opened the link inside an app (WeChat, etc.), tap ⋯ and "Open in browser" — use Chrome, Edge or Safari.':
+            '此浏览器禁用了麦克风访问。如果你是在 App 内(如微信)打开的链接,请点右上角 ⋯ 选择"在浏览器打开" —— 用 Chrome、Edge 或 Safari。',
+        'Microphone permission is blocked. Click the 🔒 / camera icon in the address bar, set Microphone to Allow, then reload.':
+            '麦克风权限已被阻止。请点击地址栏的 🔒 / 摄像头图标,把"麦克风"设为"允许",然后刷新页面。',
+        'Tap the Microphone button below to start — the browser only turns the mic on after you tap.':
+            '请点击下方的"麦克风"按钮开始 —— 浏览器只有在你点击之后才会开启麦克风。',
+        'No microphone found. Connect one and click Microphone to retry.':
+            '未找到麦克风。请接入麦克风后,点击"麦克风"重试。',
+        'The microphone is in use by another app. Close it and click Microphone to retry.':
+            '麦克风正被其他应用占用。请关闭该应用后,点击"麦克风"重试。',
         'That device is no longer available. Pick another.': '此设备不再可用。请选择其他设备。',
         'Failed to start source. See console for details.': '源启动失败。详情请查看控制台。',
         "Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed.":
@@ -3029,7 +3050,12 @@ window.addEventListener('DOMContentLoaded', () => {
         return window.__audio;
     }
 
+    // Set true once pickSource has surfaced a specific failure reason, so the
+    // 3s safety-net timer below won't clobber it with a generic message.
+    let micErrorShown = false;
+
     async function pickSource (kind, file, deviceId) {
+        micErrorShown = false;
         srcBtns.forEach(b => b.disabled = true);
         setHint(t('Requesting…'));
         const audio = getAnalyzer();
@@ -3046,18 +3072,44 @@ window.addEventListener('DOMContentLoaded', () => {
             setHint('');
         } catch (err) {
             console.error('Source error:', err);
+            // A precise reason is about to go on screen — tell the 3s safety
+            // net not to overwrite it with the generic "didn't start" message.
+            micErrorShown = true;
             // Auto-mic on page load starts with overlay hidden; surface it so
             // the user can see the failure and act on it.
             overlay.classList.remove('hidden');
             srcBtns.forEach(b => { if (!b.dataset.permaDisabled) b.disabled = false; });
             const msg = err && err.message;
-            if (msg === 'UNSUPPORTED') {
+            const name = err && err.name;
+            if (msg === 'INSECURE_CONTEXT') {
+                setHint(t('Microphone needs HTTPS or localhost. This page is on neither, so the browser blocks it. Open the HTTPS link or run a local server.'), true);
+            } else if (msg === 'NO_MEDIA_DEVICES') {
+                setHint(t('This browser blocks microphone access. If you opened the link inside an app (WeChat, etc.), tap ⋯ and "Open in browser" — use Chrome, Edge or Safari.'), true);
+            } else if (msg === 'UNSUPPORTED') {
                 setHint(t('This browser does not support tab / system audio capture.'), true);
             } else if (msg === 'NO_AUDIO_TRACK') {
                 setHint(t('No audio captured. Check "Share audio" when picking the source.'), true);
-            } else if (err && err.name === 'NotAllowedError') {
-                setHint(t('Permission denied. Allow access in your browser and try again.'), true);
-            } else if (err && err.name === 'OverconstrainedError') {
+            } else if (name === 'NotAllowedError' || name === 'SecurityError') {
+                // NotAllowedError means EITHER the mic is truly blocked, OR
+                // (very common on mobile) the page-load auto-start simply had no
+                // user gesture yet. The Permissions API tells them apart so the
+                // hint is actionable on the right platform.
+                let permState = null;
+                try {
+                    if (navigator.permissions && navigator.permissions.query) {
+                        permState = (await navigator.permissions.query({ name: 'microphone' })).state;
+                    }
+                } catch (_) { /* Safari etc. may reject the 'microphone' name */ }
+                if (permState === 'denied') {
+                    setHint(t('Microphone permission is blocked. Click the 🔒 / camera icon in the address bar, set Microphone to Allow, then reload.'), true);
+                } else {
+                    setHint(t('Tap the Microphone button below to start — the browser only turns the mic on after you tap.'), true);
+                }
+            } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+                setHint(t('No microphone found. Connect one and click Microphone to retry.'), true);
+            } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+                setHint(t('The microphone is in use by another app. Close it and click Microphone to retry.'), true);
+            } else if (name === 'OverconstrainedError') {
                 setHint(t('That device is no longer available. Pick another.'), true);
                 showDevicePickerView();
             } else {
@@ -3122,10 +3174,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // surface the overlay so they can click Microphone to retry manually.
     setTimeout(() => {
         const audio = window.__audio;
-        if (!audio || !audio.ready) {
-            overlay.classList.remove('hidden');
-            setHint(t("Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed."));
-        }
+        if (audio && audio.ready) return;   // mic is running — nothing to do
+        if (micErrorShown) return;          // a precise reason is already shown — don't clobber it
+        // Genuinely still pending: prompt left open/ignored, or silently stuck.
+        overlay.classList.remove('hidden');
+        setHint(t("Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed."));
     }, 3000);
 
     // Optional debug HUD — press D to toggle
