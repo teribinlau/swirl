@@ -2248,7 +2248,6 @@ const STRINGS = {
         'Microphone permission denied — needed to list devices.': '麦克风权限被拒绝 — 列出设备需要权限。',
         'Could not list audio devices.': '无法列出音频设备。',
         'No audio inputs found.': '未找到音频输入设备。',
-        'Source ended ({kind}). Pick another one.': '音频源已结束({kind})。请选择其他源。',
         'Requesting…': '请求中…',
         'This browser does not support tab / system audio capture.': '此浏览器不支持标签 / 系统音频捕获。',
         'No audio captured. Check "Share audio" when picking the source.': '未捕获到音频。选择源时请勾选"共享音频"。',
@@ -2276,6 +2275,12 @@ const STRINGS = {
             '麦克风正被其他应用占用。请关闭该应用后,点击"麦克风"重试。',
         'This browser can’t capture live mic / system audio (common in embedded preview browsers). Add an audio File instead, or open the page in Chrome / Edge / Safari.':
             '此浏览器无法捕获实时麦克风 / 系统音频(内置预览浏览器常见)。请改用"文件"音源,或在 Chrome / Edge / Safari 中打开本页。',
+        'Screen / tab share was cancelled or denied. Click + System again and remember to tick "Share audio".':
+            '屏幕 / 标签共享被取消或拒绝。请再次点击"+ 系统",并记得勾选"共享音频"。',
+        'Couldn’t play that file. Tap + File and pick an audio file again.':
+            '无法播放该文件。请点击"+ 文件"重新选择一个音频文件。',
+        'That audio file format isn’t supported. Try MP3, WAV or OGG.':
+            '不支持该音频格式。请改用 MP3、WAV 或 OGG。',
         'That device is no longer available. Pick another.': '此设备不再可用。请选择其他设备。',
         'Failed to start source. See console for details.': '源启动失败。详情请查看控制台。',
         "Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed.":
@@ -3229,52 +3234,75 @@ window.addEventListener('DOMContentLoaded', () => {
             setHint('');
         } catch (err) {
             console.error('Source error:', err);
-            // A precise reason is about to go on screen — tell the 3s safety
-            // net not to overwrite it with the generic "didn't start" message.
+            // A precise reason is about to be shown — stop the 3s safety net
+            // from clobbering it with the generic "didn't start" message.
             micErrorShown = true;
-            // Auto-mic on page load starts with overlay hidden; surface it so
-            // the user can see the failure and act on it.
-            overlay.classList.remove('hidden');
-            srcBtns.forEach(b => { if (!b.dataset.permaDisabled) b.disabled = false; });
             const msg = err && err.message;
             const name = err && err.name;
+
+            // Resolve a message that fits the KIND being added — pickSource is
+            // shared across mic / system / file, so e.g. a cancelled screen
+            // share must not show microphone-permission wording.
+            let text;
             if (msg === 'INSECURE_CONTEXT') {
-                setHint(t('Microphone needs HTTPS or localhost. This page is on neither, so the browser blocks it. Open the HTTPS link or run a local server.'), true);
+                text = t('Microphone needs HTTPS or localhost. This page is on neither, so the browser blocks it. Open the HTTPS link or run a local server.');
             } else if (msg === 'NO_MEDIA_DEVICES') {
-                setHint(t('This browser blocks microphone access. If you opened the link inside an app (WeChat, etc.), tap ⋯ and "Open in browser" — use Chrome, Edge or Safari.'), true);
+                text = t('This browser blocks microphone access. If you opened the link inside an app (WeChat, etc.), tap ⋯ and "Open in browser" — use Chrome, Edge or Safari.');
             } else if (msg === 'UNSUPPORTED') {
-                setHint(t('This browser does not support tab / system audio capture.'), true);
+                text = t('This browser does not support tab / system audio capture.');
             } else if (msg === 'NO_AUDIO_TRACK') {
-                setHint(t('No audio captured. Check "Share audio" when picking the source.'), true);
+                text = t('No audio captured. Check "Share audio" when picking the source.');
             } else if (name === 'NotAllowedError' || name === 'SecurityError') {
-                // NotAllowedError means EITHER the mic is truly blocked, OR
-                // (very common on mobile) the page-load auto-start simply had no
-                // user gesture yet. The Permissions API tells them apart so the
-                // hint is actionable on the right platform.
-                let permState = null;
-                try {
-                    if (navigator.permissions && navigator.permissions.query) {
-                        permState = (await navigator.permissions.query({ name: 'microphone' })).state;
-                    }
-                } catch (_) { /* Safari etc. may reject the 'microphone' name */ }
-                if (permState === 'denied') {
-                    setHint(t('Microphone permission is blocked. Click the 🔒 / camera icon in the address bar, set Microphone to Allow, then reload.'), true);
+                if (kind === 'display') {
+                    text = t('Screen / tab share was cancelled or denied. Click + System again and remember to tick "Share audio".');
+                } else if (kind === 'file') {
+                    text = t('Couldn’t play that file. Tap + File and pick an audio file again.');
                 } else {
-                    setHint(t('Tap the Microphone button below to start — the browser only turns the mic on after you tap.'), true);
+                    // mic: truly blocked vs just needs a user gesture (mobile).
+                    // The Permissions API tells them apart so the hint is actionable.
+                    let permState = null;
+                    try {
+                        if (navigator.permissions && navigator.permissions.query) {
+                            permState = (await navigator.permissions.query({ name: 'microphone' })).state;
+                        }
+                    } catch (_) { /* Safari etc. may reject the 'microphone' name */ }
+                    text = permState === 'denied'
+                        ? t('Microphone permission is blocked. Click the 🔒 / camera icon in the address bar, set Microphone to Allow, then reload.')
+                        : t('Tap the Microphone button below to start — the browser only turns the mic on after you tap.');
                 }
             } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
-                setHint(t('No microphone found. Connect one and click Microphone to retry.'), true);
+                text = t('No microphone found. Connect one and click Microphone to retry.');
             } else if (name === 'NotReadableError' || name === 'TrackStartError') {
-                setHint(t('The microphone is in use by another app. Close it and click Microphone to retry.'), true);
+                text = t('The microphone is in use by another app. Close it and click Microphone to retry.');
             } else if (name === 'OverconstrainedError') {
-                setHint(t('That device is no longer available. Pick another.'), true);
-                showDevicePickerView();
+                text = t('That device is no longer available. Pick another.');
             } else if (name === 'NotSupportedError') {
-                // Common in embedded / preview / automation browsers with no
-                // real mic backend. File playback still works there.
-                setHint(t('This browser can’t capture live mic / system audio (common in embedded preview browsers). Add an audio File instead, or open the page in Chrome / Edge / Safari.'), true);
+                text = kind === 'file'
+                    ? t('That audio file format isn’t supported. Try MP3, WAV or OGG.')
+                    : t('This browser can’t capture live mic / system audio (common in embedded preview browsers). Add an audio File instead, or open the page in Chrome / Edge / Safari.');
             } else {
-                setHint(t('Failed to start source. See console for details.'), true);
+                text = t('Failed to start source. See console for details.');
+            }
+
+            // Route it: if other sources are already running, keep them and show
+            // the error inline in the mixer; only the zero-source case takes over
+            // the full start overlay.
+            if (audio.sources.length > 0) {
+                renderMixer();
+                const sec = document.getElementById('mixer-section');
+                if (sec) {
+                    const e = document.createElement('div');
+                    e.className = 'mixer-error';
+                    e.textContent = text;
+                    const addRow = sec.querySelector('.mixer-add');
+                    if (addRow && addRow.nextSibling) sec.insertBefore(e, addRow.nextSibling);
+                    else sec.appendChild(e);
+                }
+            } else {
+                overlay.classList.remove('hidden');
+                srcBtns.forEach(b => { if (!b.dataset.permaDisabled) b.disabled = false; });
+                setHint(text, true);
+                if (name === 'OverconstrainedError') showDevicePickerView();
             }
         }
     }
