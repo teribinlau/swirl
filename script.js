@@ -175,7 +175,17 @@ function supportRenderTextureFormat (gl, internalFormat, format, type) {
 }
 
 function isMobile () {
-    return /Mobi|Android/i.test(navigator.userAgent);
+    return /Mobi|Android/i.test(navigator.userAgent) || isIOS();
+}
+
+// iOS / iPadOS Safari requires a user gesture to show the getUserMedia prompt
+// and to resume an AudioContext, so any auto-start of the mic at page load
+// fails silently. iPad on iPadOS 13+ reports a Mac userAgent — detect it via
+// the touch-point trick.
+function isIOS () {
+    const ua = navigator.userAgent;
+    if (/iPhone|iPod|iPad/i.test(ua)) return true;
+    return navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
 }
 
 function captureScreenshot () {
@@ -3351,19 +3361,30 @@ window.addEventListener('DOMContentLoaded', () => {
     // time; returning users with permission granted just go straight in.
     // pickSource() re-shows the overlay only if mic start fails.
     renderMixer();   // show the SOURCES panel section up-front (even before/if mic starts)
-    pickSource('mic');
 
-    // Safety net: if the mic hasn't started within 3s (browser silently
-    // blocked the prompt, or HTTPS not available, or user dismissed it),
-    // surface the overlay so they can click Microphone to retry manually.
-    setTimeout(() => {
-        const audio = window.__audio;
-        if (audio && audio.ready) return;   // mic is running — nothing to do
-        if (micErrorShown) return;          // a precise reason is already shown — don't clobber it
-        // Genuinely still pending: prompt left open/ignored, or silently stuck.
+    // iOS / iPadOS Safari blocks both getUserMedia and AudioContext.resume()
+    // outside a user gesture, so auto-start always fails and the 3s safety
+    // net then shows a misleading "didn't start" error. Skip auto-start on
+    // iOS and let the user tap Microphone — that tap is the gesture Safari
+    // needs.
+    if (isIOS()) {
         overlay.classList.remove('hidden');
-        setHint(t("Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed."));
-    }, 3000);
+        setHint(t('Tap the Microphone button below to start — the browser only turns the mic on after you tap.'));
+    } else {
+        pickSource('mic');
+
+        // Safety net: if the mic hasn't started within 3s (browser silently
+        // blocked the prompt, or HTTPS not available, or user dismissed it),
+        // surface the overlay so they can click Microphone to retry manually.
+        setTimeout(() => {
+            const audio = window.__audio;
+            if (audio && audio.ready) return;   // mic is running — nothing to do
+            if (micErrorShown) return;          // a precise reason is already shown — don't clobber it
+            // Genuinely still pending: prompt left open/ignored, or silently stuck.
+            overlay.classList.remove('hidden');
+            setHint(t("Microphone didn't start. Click Microphone to retry, or check that the site is on HTTPS and microphone access is allowed."));
+        }, 3000);
+    }
 
     // Optional debug HUD — press D to toggle
     const debugEl = document.getElementById('debug');
