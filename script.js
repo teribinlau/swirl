@@ -2369,8 +2369,13 @@ const STRINGS = {
         'Save as default': '保存为默认',
         'Reset to factory': '恢复出厂',
         'Copy settings as JSON': '复制设置为 JSON',
+        'Export to file': '导出为文件',
+        'Import settings': '导入设置',
         'Saved ✓': '已保存 ✓',
         'Copied ✓': '已复制 ✓',
+        'Exported ✓': '已导出 ✓',
+        'Imported ✓': '已导入 ✓',
+        'Bad file': '文件无效',
         'See console': '查看控制台',
 
         // ── Tooltips ────────────────────────────────────────────
@@ -2466,6 +2471,10 @@ const STRINGS = {
             '清除此浏览器中保存的快照并重新加载。页面将以出厂默认预设重新启动。',
         'Copy the current panel state to your clipboard as a JSON object. Use this to share a configuration or paste into source code as a new factory default.':
             '将当前面板状态作为 JSON 对象复制到剪贴板。用于分享配置或作为新出厂默认粘贴到源代码。',
+        'Download the current panel state as swirl-settings.json. Unlike "Save as default" (this browser only), the file works across devices, browsers and after clearing site data — re-load it any time with "Import settings".':
+            '将当前面板状态下载为 swirl-settings.json 文件。与"保存为默认"(仅限本浏览器)不同,该文件可跨设备、跨浏览器、清除站点数据后仍可用 —— 随时用"导入设置"重新载入。',
+        'Load a swirl-settings.json file exported earlier (or shared by someone else) and apply every value immediately. Tip: follow with "Save as default" to keep it on the next page load.':
+            '载入此前导出(或他人分享)的 swirl-settings.json 文件并立即应用全部数值。提示:之后点"保存为默认"即可在下次加载时保留。',
     },
 };
 
@@ -2704,6 +2713,32 @@ const PANEL_SCHEMA = [
                       setTimeout(() => { btn.textContent = orig; }, 1400);
                   });
               } },
+            { type: 'button', label: 'Export to file',
+              tip: 'Download the current panel state as swirl-settings.json. Unlike "Save as default" (this browser only), the file works across devices, browsers and after clearing site data — re-load it any time with "Import settings".',
+              action: (btn) => {
+                  const ok = exportSettingsToFile();
+                  const orig = btn.textContent;
+                  btn.textContent = ok ? t('Exported ✓') : t('See console');
+                  setTimeout(() => { btn.textContent = orig; }, 1400);
+              } },
+            { type: 'button', label: 'Import settings',
+              tip: 'Load a swirl-settings.json file exported earlier (or shared by someone else) and apply every value immediately. Tip: follow with "Save as default" to keep it on the next page load.',
+              action: (btn) => {
+                  const input = document.getElementById('settings-import-input');
+                  if (!input) return;
+                  // Re-bind each click so the closure always sees this btn.
+                  input.onchange = () => {
+                      const file = input.files && input.files[0];
+                      input.value = '';   // allow re-picking the same file later
+                      if (!file) return;
+                      importSettingsFromFile(file).then(ok => {
+                          const orig = btn.textContent;
+                          btn.textContent = ok ? t('Imported ✓') : t('Bad file');
+                          setTimeout(() => { btn.textContent = orig; }, 1600);
+                      });
+                  };
+                  input.click();
+              } },
         ],
     },
 ];
@@ -2911,18 +2946,37 @@ function saveSettingsToStorage () {
     }
 }
 
+// Apply a settings snapshot (from localStorage OR an imported file) onto the
+// live state. Pure data — it does NOT touch the DOM/shaders, so callers must
+// follow it with syncUIFromState() when applying after first paint.
+function applySettings (s) {
+    if (!s || typeof s !== 'object') return false;
+    if (s.config)        Object.assign(config, s.config);
+    if (s.AUDIO)         Object.assign(AUDIO, s.AUDIO);
+    if (s.PALETTE)       Object.assign(PALETTE, s.PALETTE);
+    if (s.filterState)   Object.assign(filterState, s.filterState);
+    if (typeof s.currentTrajectory === 'string')  currentTrajectory  = s.currentTrajectory === 'RAIN' ? 'BLINK' : s.currentTrajectory;
+    if (typeof s.currentPresetName === 'string')  currentPresetName  = s.currentPresetName === 'RAIN' ? 'BLINK' : s.currentPresetName;
+    return true;
+}
+
+// Push the whole in-memory state out to the UI + shaders at once. Used after a
+// bulk change (import) so sliders, toggles, mode tabs, filter tabs and the
+// WebGL keywords all catch up together.
+function syncUIFromState () {
+    updateKeywords();
+    document.querySelectorAll('.modes button').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === currentPresetName);
+    });
+    applyFilter();   // also re-syncs the .filters tab bar active state
+    refreshPanel();  // re-syncs every panel slider / toggle / select
+}
+
 function loadSettingsFromStorage () {
     try {
         const raw = localStorage.getItem(SWIRL_STORAGE_KEY);
         if (!raw) return false;
-        const s = JSON.parse(raw);
-        if (s.config)        Object.assign(config, s.config);
-        if (s.AUDIO)         Object.assign(AUDIO, s.AUDIO);
-        if (s.PALETTE)       Object.assign(PALETTE, s.PALETTE);
-        if (s.filterState)   Object.assign(filterState, s.filterState);
-        if (typeof s.currentTrajectory === 'string')  currentTrajectory  = s.currentTrajectory === 'RAIN' ? 'BLINK' : s.currentTrajectory;
-        if (typeof s.currentPresetName === 'string')  currentPresetName  = s.currentPresetName === 'RAIN' ? 'BLINK' : s.currentPresetName;
-        return true;
+        return applySettings(JSON.parse(raw));
     } catch (e) {
         console.warn('Load failed:', e);
         return false;
@@ -2944,6 +2998,48 @@ async function copySettingsAsJSON () {
         console.log(json);
         return false;
     }
+}
+
+// Download the current settings as a .json file. Pairs with importSettings():
+// unlike "Save as default" (localStorage), a file survives across devices,
+// browsers and cache clears.
+function exportSettingsToFile () {
+    try {
+        const json = JSON.stringify(captureSettings(), null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        downloadURI('swirl-settings.json', url);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        return true;
+    } catch (e) {
+        console.warn('Export failed:', e);
+        return false;
+    }
+}
+
+// Read a user-picked .json file, sanity-check it's a SWIRL snapshot, apply it
+// and refresh the UI. Resolves true on success, false on a bad/unknown file.
+function importSettingsFromFile (file) {
+    return new Promise(resolve => {
+        if (!file) return resolve(false);
+        const reader = new FileReader();
+        reader.onload = () => {
+            let s;
+            try { s = JSON.parse(reader.result); }
+            catch (e) { console.warn('Import: not valid JSON', e); return resolve(false); }
+            // Shape guard so an unrelated .json doesn't silently wipe state.
+            if (!s || typeof s !== 'object' ||
+                (!s.config && !s.AUDIO && !s.PALETTE && !s.filterState)) {
+                console.warn('Import: not a SWIRL settings file', s);
+                return resolve(false);
+            }
+            applySettings(s);
+            syncUIFromState();
+            resolve(true);
+        };
+        reader.onerror = () => { console.warn('Import: read error', reader.error); resolve(false); };
+        reader.readAsText(file);
+    });
 }
 
 // ============================================================
