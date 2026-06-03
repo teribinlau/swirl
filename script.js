@@ -1349,6 +1349,28 @@ function correctRadius (radius) {
     return radius;
 }
 
+// One raindrop ripple: a continuous ring of dye dabs centred on (cx, cy), each
+// pushing radially OUTWARD so the ring expands over the following frames into a
+// real concentric ripple. The offsets are ASPECT-CORRECTED so the ring stays a
+// true circle on screen — without this, a circle in UV space renders as a
+// left-right-stretched ellipse on wide canvases (the old "撑开" look), because a
+// UV x-step spans more pixels than the same y-step. The velocity x-component is
+// corrected the same way so the ring expands evenly in every direction. Point
+// count scales with the circumference so larger rings stay smooth.
+function splatRing (cx, cy, ringRadius, ringForce, color) {
+    const aspect = canvas.width / canvas.height;   // >1 landscape, <1 portrait
+    const rx = ringRadius / aspect;                // squeeze the wider axis
+    const ry = ringRadius;
+    const count = Math.min(48, Math.max(20, Math.round(ringRadius * 800)));
+    const phase = Math.random() * Math.PI * 2;     // rotate each drop so seams don't align
+    for (let k = 0; k < count; k++) {
+        const a = phase + (k / count) * Math.PI * 2;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        splat(cx + ca * rx, cy + sa * ry,
+              (ca * ringForce) / aspect, sa * ringForce, color);
+    }
+}
+
 // ============================================================
 // Mouse/touch input is removed — flow is driven by audio below.
 // `pause` keybinding kept for convenience.
@@ -1990,23 +2012,14 @@ function applyAudioInputs (audio) {
             continue;
         }
         if (isBlink) {
-            // True ring ripple: N splats arranged in a circle around the impact
-            // point, each pushing radially OUTWARD. This is what creates the
-            // visible concentric expanding ring instead of a single splotch.
-            const RING_COUNT = 8;
+            // One expanding raindrop ripple at the impact point. Small, dense
+            // dabs merge into a thin circle that the outward velocity grows
+            // into a concentric ring (splatRing keeps it circular on screen).
             const ringRadius = 0.022 + e * 0.028 + audio.smoothedVolume * 0.02;
-            // Per-ring-point splat is small so dots merge into a ring rather
-            // than appearing as 8 discrete blobs.
             config.SPLAT_RADIUS = origRadius * (0.45 + e * 0.35);
             // Ring force is independent of trajectory dx/dy — purely radial.
             const ringForce = e * AUDIO.SPLAT_FORCE * 0.28 * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
-            const phase = Math.random() * Math.PI * 2;   // rotate ring randomly each drop
-            for (let k = 0; k < RING_COUNT; k++) {
-                const a = phase + (k / RING_COUNT) * Math.PI * 2;
-                const ca = Math.cos(a), sa = Math.sin(a);
-                splat(pt.x + ca * ringRadius, pt.y + sa * ringRadius,
-                      ca * ringForce, sa * ringForce, color);
-            }
+            splatRing(pt.x, pt.y, ringRadius, ringForce, color);
             continue;
         }
         splat(pt.x, pt.y, dx, dy, color);
@@ -2042,19 +2055,11 @@ function audioBurst (amount, audio, gain) {
             continue;
         }
         if (isBlink) {
-            // Burst raindrop = a single, larger ring ripple at a random spot
-            const cx = Math.random(), cy = Math.random();
-            const RING_COUNT = 10;
+            // Burst raindrop = a single, larger ring ripple at a random spot.
             const ringRadius = 0.035 + audio.smoothedVolume * 0.025;
             config.SPLAT_RADIUS = origRadius * 0.55;
             const ringForce = f * 0.25;
-            const phase = Math.random() * Math.PI * 2;
-            for (let k = 0; k < RING_COUNT; k++) {
-                const a = phase + (k / RING_COUNT) * Math.PI * 2;
-                const ca = Math.cos(a), sa = Math.sin(a);
-                splat(cx + ca * ringRadius, cy + sa * ringRadius,
-                      ca * ringForce, sa * ringForce, color);
-            }
+            splatRing(Math.random(), Math.random(), ringRadius, ringForce, color);
             continue;
         }
         // Default: random scatter in random direction
