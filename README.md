@@ -9,8 +9,12 @@ music and the fluid responds in colour, intensity and rhythm.
 - **Real-time fluid simulation** built on Pavel Dobryakov's WebGL fluid engine
 - **Microphone-driven splat injection** across 6 log-spaced frequency bands
 - **Onset detection** (spectral flux) triggers bursts on transients / beats
-- **5 mode presets**: Default · Smoke · Ink · Rainbow · Aqua (rising bubbles)
-- **5 trajectories**: Random · Lissajous · Orbit · Sine wave · Aqua
+- **9 mode presets** — each a complete scene (physics + trajectory + palette):
+  Smoke (mono plumes) · Ink (indigo wisps) · Rainbow (full spectrum) ·
+  Aqua (rising bubbles) · Blink (raindrop ripples) · Vortex (whirlpool) ·
+  Kaleido (6-fold mandala) · Comet (meteor streaks) · Pulse (beat rings)
+- **10 trajectories**: Random · Lissajous · Orbit · Sine wave · Aqua · Blink ·
+  Vortex · Kaleido · Comet · Pulse
 - **11 post-processing filters**, including SVG displacement glass effects
   (Reeded, Ripple, Pebbled, Diamond, Molten)
 - **3-mode palette system**: Full rainbow / Single hue family / Mono greyscale

@@ -647,6 +647,40 @@ const splatShader = compileShader(gl.FRAGMENT_SHADER, `
     }
 `);
 
+// Draws a whole raindrop-ripple ring in ONE pass: a gaussian annulus of dye,
+// or (velocityPass=1) a radial outward push along that annulus. Replaces the
+// 20–48 individual splats (40–96 fullscreen blits) a JS-loop ring needed.
+// Distances are measured in aspect-corrected space (p.x *= aspectRatio), so
+// the ring is a true circle on screen for any canvas shape; the velocity
+// x-component is divided back so the push is even in every direction.
+const ringSplatShader = compileShader(gl.FRAGMENT_SHADER, `
+    precision highp float;
+    precision highp sampler2D;
+
+    varying vec2 vUv;
+    uniform sampler2D uTarget;
+    uniform float aspectRatio;
+    uniform vec3 color;
+    uniform vec2 point;
+    uniform float radius;       // ring radius, in height-fraction units
+    uniform float thickness;    // gaussian variance of the annulus cross-section
+    uniform float velocityPass; // 1.0 = write radial push, 0.0 = write dye color
+    uniform float force;
+
+    void main () {
+        vec2 p = vUv - point.xy;
+        p.x *= aspectRatio;
+        float d = length(p);
+        float band = d - radius;
+        float ring = exp(-band * band / thickness);
+        vec2 dir = p / max(d, 0.0001);
+        vec3 radial = vec3(dir.x / aspectRatio, dir.y, 0.0) * force;
+        vec3 add = mix(color, radial, velocityPass) * ring;
+        vec3 base = texture2D(uTarget, vUv).xyz;
+        gl_FragColor = vec4(base + add, 1.0);
+    }
+`);
+
 const advectionShader = compileShader(gl.FRAGMENT_SHADER, `
     precision highp float;
     precision highp sampler2D;
@@ -874,6 +908,7 @@ const bloomFinalProgram      = new Program(baseVertexShader, bloomFinalShader);
 const sunraysMaskProgram     = new Program(baseVertexShader, sunraysMaskShader);
 const sunraysProgram         = new Program(baseVertexShader, sunraysShader);
 const splatProgram           = new Program(baseVertexShader, splatShader);
+const ringProgram            = new Program(baseVertexShader, ringSplatShader);
 const advectionProgram       = new Program(baseVertexShader, advectionShader);
 const divergenceProgram      = new Program(baseVertexShader, divergenceShader);
 const curlProgram            = new Program(baseVertexShader, curlShader);
@@ -1349,25 +1384,51 @@ function correctRadius (radius) {
     return radius;
 }
 
-// One raindrop ripple: a continuous ring of dye dabs centred on (cx, cy), each
-// pushing radially OUTWARD so the ring expands over the following frames into a
-// real concentric ripple. The offsets are ASPECT-CORRECTED so the ring stays a
-// true circle on screen — without this, a circle in UV space renders as a
-// left-right-stretched ellipse on wide canvases (the old "撑开" look), because a
-// UV x-step spans more pixels than the same y-step. The velocity x-component is
-// corrected the same way so the ring expands evenly in every direction. Point
-// count scales with the circumference so larger rings stay smooth.
-function splatRing (cx, cy, ringRadius, ringForce, color) {
-    const aspect = canvas.width / canvas.height;   // >1 landscape, <1 portrait
-    const rx = ringRadius / aspect;                // squeeze the wider axis
-    const ry = ringRadius;
-    const count = Math.min(48, Math.max(20, Math.round(ringRadius * 800)));
-    const phase = Math.random() * Math.PI * 2;     // rotate each drop so seams don't align
-    for (let k = 0; k < count; k++) {
-        const a = phase + (k / count) * Math.PI * 2;
+// One raindrop ripple, rendered by the one-pass ring shader: a continuous
+// gaussian annulus of dye centred on (x, y), with a matching radial outward
+// push so the ring expands into a real concentric ripple over the following
+// frames. Two fullscreen blits total (velocity + dye) — the previous JS-loop
+// version needed up to 96. The shader aspect-corrects internally, so the
+// ripple is a true circle on screen for any canvas shape. `thickness` is in
+// config.SPLAT_RADIUS units and controls the width of the ring's cross-section.
+function splatRing (x, y, ringRadius, ringForce, color, thickness = config.SPLAT_RADIUS) {
+    ringProgram.bind();
+    gl.uniform1f(ringProgram.uniforms.aspectRatio, canvas.width / canvas.height);
+    gl.uniform2f(ringProgram.uniforms.point, x, y);
+    gl.uniform1f(ringProgram.uniforms.radius, ringRadius);
+    gl.uniform1f(ringProgram.uniforms.thickness, correctRadius(thickness / 100.0));
+    // Velocity pass — radial outward push along the annulus
+    gl.uniform1i(ringProgram.uniforms.uTarget, velocity.read.attach(0));
+    gl.uniform1f(ringProgram.uniforms.velocityPass, 1.0);
+    gl.uniform1f(ringProgram.uniforms.force, ringForce);
+    blit(velocity.write);
+    velocity.swap();
+    // Dye pass — tint the same annulus
+    gl.uniform1i(ringProgram.uniforms.uTarget, dye.read.attach(0));
+    gl.uniform1f(ringProgram.uniforms.velocityPass, 0.0);
+    gl.uniform3f(ringProgram.uniforms.color, color.r, color.g, color.b);
+    blit(dye.write);
+    dye.swap();
+}
+
+// Emit a splat plus its N-fold rotated copies around the canvas center —
+// the KALEIDO mode's mirror symmetry. Rotation happens in aspect-corrected
+// space so the mandala stays rotationally symmetric on screen, not just in
+// UV coordinates.
+const KALEIDO_SYMMETRY = 6;
+function emitKaleido (x, y, dx, dy, color) {
+    const aspect = canvas.width / canvas.height;
+    const px = (x - 0.5) * aspect, py = y - 0.5;
+    const vx = dx * aspect,        vy = dy;
+    for (let k = 0; k < KALEIDO_SYMMETRY; k++) {
+        const a = (k / KALEIDO_SYMMETRY) * Math.PI * 2;
         const ca = Math.cos(a), sa = Math.sin(a);
-        splat(cx + ca * rx, cy + sa * ry,
-              (ca * ringForce) / aspect, sa * ringForce, color);
+        splat(
+            0.5 + (px * ca - py * sa) / aspect,
+            0.5 + (px * sa + py * ca),
+            (vx * ca - vy * sa) / aspect,
+            vx * sa + vy * ca,
+            color);
     }
 }
 
@@ -1883,6 +1944,62 @@ const TRAJECTORY = {
         const angle = Math.random() * Math.PI * 2;
         return { x, y, dx: Math.cos(angle), dy: Math.sin(angle) };
     },
+    VORTEX: (i, t) => {
+        // All bands feed ONE coherent whirlpool: each band rides its own ring
+        // around the center, pushing tangentially (counter-clockwise) with a
+        // slight inward pull so dye spirals toward the eye instead of flying
+        // off. Geometry is aspect-corrected so the spiral is round on screen.
+        const aspect = canvas.width / canvas.height;
+        const r = 0.10 + (i / NUM_BANDS) * 0.26;          // height-fraction units
+        const theta = t * (0.4 + i * 0.07) + i * 2.4;     // slow per-band drift
+        const ca = Math.cos(theta), sa = Math.sin(theta);
+        let dxA = -sa - ca * 0.25;                        // tangent + 25% inward
+        let dyA =  ca - sa * 0.25;
+        const len = Math.hypot(dxA, dyA) || 1;
+        return {
+            x: 0.5 + ca * r / aspect,
+            y: 0.5 + sa * r,
+            dx: (dxA / len) / aspect,
+            dy: dyA / len,
+        };
+    },
+    KALEIDO: (i, t) => {
+        // Seed point for the 6-fold mirror (emitKaleido rotates the copies):
+        // a random radius from the center — capped so every rotated copy
+        // stays on screen for any aspect — at a random angle, pushed in a
+        // blend of outward and tangential directions for petal-like swirls.
+        const aspect = canvas.width / canvas.height;
+        const radMax = Math.min(0.40, 0.45 * aspect);
+        const rad = radMax * (0.18 + 0.82 * Math.random());
+        const ang = Math.random() * Math.PI * 2;
+        const ca = Math.cos(ang), sa = Math.sin(ang);
+        const mix = Math.random() * 0.8;                  // 0 = radial, 0.8 = mostly tangential
+        const dxA = ca * (1 - mix) - sa * mix;
+        const dyA = sa * (1 - mix) + ca * mix;
+        const len = Math.hypot(dxA, dyA) || 1;
+        return {
+            x: 0.5 + ca * rad / aspect,
+            y: 0.5 + sa * rad,
+            dx: (dxA / len) / aspect,
+            dy: dyA / len,
+        };
+    },
+    COMET: (i, t) => {
+        // Meteor shower: streaks spawn near the top edge and fly right-and-
+        // down in near-parallel lanes; higher bands take slightly steeper
+        // angles so the sky layers. (UV y = 1 is the top of the canvas.)
+        const x = Math.random() * 0.55 - 0.05;
+        const y = 0.70 + Math.random() * 0.28;
+        const ang = -0.38 - i * 0.05 + (Math.random() - 0.5) * 0.10;
+        return { x, y, dx: Math.cos(ang), dy: Math.sin(ang) };
+    },
+    PULSE: (i, t) => {
+        // PULSE emits shader rings from the center (see applyAudioInputs);
+        // position is the center and direction random-outward, only used as
+        // a fallback if another code path consumes the trajectory directly.
+        const ang = Math.random() * Math.PI * 2;
+        return { x: 0.5, y: 0.5, dx: Math.cos(ang), dy: Math.sin(ang) };
+    },
 };
 
 let currentTrajectory = 'RANDOM';
@@ -1976,9 +2093,12 @@ function applyAudioInputs (audio) {
     const compress = 1 / (1 + audio.smoothedVolume * AUDIO.VOLUME_COMPRESS);
     const effectiveGain = AUDIO.COLOR_GAIN * compress;
 
-    // Per-trajectory tweaks for discrete-event modes (AQUA, BLINK).
-    const isAqua = currentTrajectory === 'AQUA';
-    const isBlink = currentTrajectory === 'BLINK';
+    // Per-trajectory tweaks for the discrete-event / structured modes.
+    const isAqua    = currentTrajectory === 'AQUA';
+    const isBlink   = currentTrajectory === 'BLINK';
+    const isKaleido = currentTrajectory === 'KALEIDO';
+    const isComet   = currentTrajectory === 'COMET';
+    const isPulse   = currentTrajectory === 'PULSE';
     const origRadius = config.SPLAT_RADIUS;
 
     for (let i = 0; i < NUM_BANDS; i++) {
@@ -1987,15 +2107,19 @@ function applyAudioInputs (audio) {
 
         const e = Math.pow(energy, AUDIO.ENERGY_CURVE);
 
-        // Stochastic gate so AQUA bubbles / BLINK rings are discrete events,
-        // not a 360-splats-per-second continuous stream.
-        if (isAqua && Math.random() > e * 0.10) continue;
-        if (isBlink && Math.random() > e * 0.18) continue;
+        // Stochastic gates so discrete-event modes fire as distinct events,
+        // not a 360-splats-per-second continuous stream. KALEIDO's gate also
+        // compensates its 6× mirror copies so GPU cost stays near other modes.
+        if (isAqua    && Math.random() > e * 0.10) continue;
+        if (isBlink   && Math.random() > e * 0.18) continue;
+        if (isPulse   && Math.random() > e * 0.22) continue;
+        if (isKaleido && Math.random() > 0.60)     continue;
 
         const pt = traj(i, t);
 
         // AQUA: gentle rising bubbles (not jets). BLINK: tiny impact pulses.
-        const forceMult = isAqua ? 0.35 : isBlink ? 0.20 : 1.0;
+        // COMET: fast meteor streaks need extra push.
+        const forceMult = isAqua ? 0.35 : isBlink ? 0.20 : isComet ? 1.5 : 1.0;
         const force = e * AUDIO.SPLAT_FORCE * forceMult * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
         const dx = pt.dx * force;
         const dy = pt.dy * force;
@@ -2012,20 +2136,30 @@ function applyAudioInputs (audio) {
             continue;
         }
         if (isBlink) {
-            // One expanding raindrop ripple at the impact point. Small, dense
-            // dabs merge into a thin circle that the outward velocity grows
-            // into a concentric ring (splatRing keeps it circular on screen).
+            // One expanding raindrop ripple at the impact point, drawn by the
+            // one-pass ring shader (true circle on screen, 2 blits total).
             const ringRadius = 0.022 + e * 0.028 + audio.smoothedVolume * 0.02;
-            config.SPLAT_RADIUS = origRadius * (0.45 + e * 0.35);
-            // Ring force is independent of trajectory dx/dy — purely radial.
             const ringForce = e * AUDIO.SPLAT_FORCE * 0.28 * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
-            splatRing(pt.x, pt.y, ringRadius, ringForce, color);
+            splatRing(pt.x, pt.y, ringRadius, ringForce, color, origRadius * (0.45 + e * 0.35));
+            continue;
+        }
+        if (isPulse) {
+            // Speaker-cone rings: every band owns a radius slot out from the
+            // center — bass flashes the inner rings, air the outer ones.
+            const ringRadius = 0.05 + (i / NUM_BANDS) * 0.30 + audio.smoothedVolume * 0.03;
+            const ringForce = e * AUDIO.SPLAT_FORCE * 0.22 * (0.5 + audio.smoothedVolume * AUDIO.VOLUME_GAIN);
+            splatRing(0.5, 0.5, ringRadius, ringForce, color, origRadius * (0.35 + e * 0.3));
+            continue;
+        }
+        if (isKaleido) {
+            // 6-fold mirrored mandala: the seed splat plus 5 rotated copies.
+            emitKaleido(pt.x, pt.y, dx, dy, color);
             continue;
         }
         splat(pt.x, pt.y, dx, dy, color);
     }
 
-    if (isAqua || isBlink) config.SPLAT_RADIUS = origRadius;
+    if (isAqua) config.SPLAT_RADIUS = origRadius;
 
     if (audio.onset) {
         const burst = Math.max(1, Math.floor(AUDIO.ONSET_BURST_BASE + audio.smoothedVolume * AUDIO.ONSET_BURST_GAIN));
@@ -2037,9 +2171,11 @@ function applyAudioInputs (audio) {
 // brightness goes through softColor instead of the ×10 multiplier that
 // blows out the screen on loud beats.
 function audioBurst (amount, audio, gain) {
-    const isAqua = currentTrajectory === 'AQUA';
-    const isBlink = currentTrajectory === 'BLINK';
-    const origRadius = config.SPLAT_RADIUS;
+    const isAqua    = currentTrajectory === 'AQUA';
+    const isBlink   = currentTrajectory === 'BLINK';
+    const isKaleido = currentTrajectory === 'KALEIDO';
+    const isComet   = currentTrajectory === 'COMET';
+    const isPulse   = currentTrajectory === 'PULSE';
     for (let i = 0; i < amount; i++) {
         // Bursts are inherently punchier — push the energy term up,
         // but still through softColor so brightness can never exceed gain×1.4
@@ -2056,39 +2192,49 @@ function audioBurst (amount, audio, gain) {
         }
         if (isBlink) {
             // Burst raindrop = a single, larger ring ripple at a random spot.
-            const ringRadius = 0.035 + audio.smoothedVolume * 0.025;
-            config.SPLAT_RADIUS = origRadius * 0.55;
-            const ringForce = f * 0.25;
-            splatRing(Math.random(), Math.random(), ringRadius, ringForce, color);
+            splatRing(Math.random(), Math.random(),
+                      0.035 + audio.smoothedVolume * 0.025, f * 0.25, color,
+                      config.SPLAT_RADIUS * 0.55);
+            continue;
+        }
+        if (isPulse) {
+            // One hard shockwave from the center per onset — stacking
+            // `amount` identical rings only adds brightness, so fire once.
+            splatRing(0.5, 0.5, 0.045 + audio.smoothedVolume * 0.03,
+                      f * 0.30, color, config.SPLAT_RADIUS * 0.6);
+            return;
+        }
+        if (isKaleido) {
+            // One mirrored flare set per onset (already 6 splats).
+            const pt = TRAJECTORY.KALEIDO(0, 0);
+            emitKaleido(pt.x, pt.y, pt.dx * f, pt.dy * f, color);
+            return;
+        }
+        if (isComet) {
+            // Extra meteors streaking in on the beat
+            const pt = TRAJECTORY.COMET(Math.floor(Math.random() * NUM_BANDS), 0);
+            splat(pt.x, pt.y, pt.dx * f, pt.dy * f, color);
             continue;
         }
         // Default: random scatter in random direction
         const ang = Math.random() * Math.PI * 2;
         splat(Math.random(), Math.random(), Math.cos(ang) * f, Math.sin(ang) * f, color);
     }
-    if (isBlink) config.SPLAT_RADIUS = origRadius;
 }
 
 // ============================================================
-// PRESETS — match SWIRL's DEFAULT / SMOKE / INK / RAINBOW vibes
+// PRESETS — each mode is a complete "scene": physics + trajectory +
+// palette together. Earlier versions only changed physics knobs while
+// every mode shared the same random trajectory and full-rainbow palette,
+// which is why they all looked alike. (The old DEFAULT was merged into
+// RAINBOW — it was the same scene with milder bloom.)
 // Each preset patches `config` then forces shader keyword rebuild.
 // ============================================================
 
 const PRESETS = {
-    DEFAULT: {
-        DENSITY_DISSIPATION: 1.0,
-        VELOCITY_DISSIPATION: 0.2,
-        PRESSURE: 0.8,
-        CURL: 30,
-        SPLAT_RADIUS: 0.25,
-        BLOOM: true,
-        BLOOM_INTENSITY: 0.8,
-        BLOOM_THRESHOLD: 0.6,
-        SUNRAYS: true,
-        SUNRAYS_WEIGHT: 1.0,
-        SHADING: true,
-    },
     SMOKE: {
+        _trajectory: 'RANDOM',
+        _palette: { mode: 'MONO' },    // monochrome plumes — actual smoke
         DENSITY_DISSIPATION: 0.4,
         VELOCITY_DISSIPATION: 0.6,
         PRESSURE: 0.6,
@@ -2102,6 +2248,8 @@ const PRESETS = {
         SHADING: true,
     },
     INK: {
+        _trajectory: 'RANDOM',
+        _palette: { mode: 'SINGLE', singleHue: 0.60, singleRange: 0.06 }, // deep indigo ink-in-water
         DENSITY_DISSIPATION: 2.2,
         VELOCITY_DISSIPATION: 0.05,
         PRESSURE: 0.95,
@@ -2115,6 +2263,8 @@ const PRESETS = {
         SHADING: true,
     },
     RAINBOW: {
+        _trajectory: 'RANDOM',
+        _palette: { mode: 'FULL' },    // the full-spectrum showcase
         DENSITY_DISSIPATION: 0.8,
         VELOCITY_DISSIPATION: 0.15,
         PRESSURE: 0.8,
@@ -2149,10 +2299,70 @@ const PRESETS = {
         VELOCITY_DISSIPATION: 0.7,     // low damping — let the ring keep expanding outward
         PRESSURE: 0.85,                // mid — incompressible water-surface feel
         CURL: 5,                       // very low — clean radial expansion, no swirl
-        SPLAT_RADIUS: 0.10,            // base; ring uses ~45% of this per point
+        SPLAT_RADIUS: 0.10,            // base; sets the ring's cross-section width
         BLOOM: true,
         BLOOM_INTENSITY: 0.55,
         BLOOM_THRESHOLD: 0.55,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.5,
+        SHADING: true,
+    },
+    VORTEX: {
+        _trajectory: 'VORTEX',          // one coherent whirlpool around the center
+        _palette: { mode: 'SINGLE', singleHue: 0.74, singleRange: 0.22 }, // violet galaxy
+        DENSITY_DISSIPATION: 0.75,     // arms persist long enough to wind up
+        VELOCITY_DISSIPATION: 0.06,    // near-frictionless — rotation accumulates
+        PRESSURE: 0.85,
+        CURL: 38,                      // high curl shreds the arms into eddies
+        SPLAT_RADIUS: 0.22,
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.7,
+        BLOOM_THRESHOLD: 0.5,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.6,
+        SHADING: true,
+    },
+    KALEIDO: {
+        _trajectory: 'KALEIDO',         // 6-fold mirrored mandala around the center
+        _palette: { mode: 'FULL' },    // rainbow petals
+        DENSITY_DISSIPATION: 1.2,      // patterns refresh before they smear
+        VELOCITY_DISSIPATION: 0.4,
+        PRESSURE: 0.8,
+        CURL: 25,
+        SPLAT_RADIUS: 0.20,
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.7,
+        BLOOM_THRESHOLD: 0.55,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.6,
+        SHADING: true,
+    },
+    COMET: {
+        _trajectory: 'COMET',           // meteor streaks across the sky
+        _palette: { mode: 'SINGLE', singleHue: 0.08, singleRange: 0.08 }, // golden-orange fire
+        DENSITY_DISSIPATION: 0.9,      // tails linger, then fade
+        VELOCITY_DISSIPATION: 1.3,     // push is local & transient — clean streaks, no soup
+        PRESSURE: 0.7,
+        CURL: 8,                       // low — keep trails linear, not curly
+        SPLAT_RADIUS: 0.12,            // thin, bright heads
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.9,
+        BLOOM_THRESHOLD: 0.5,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.6,
+        SHADING: true,
+    },
+    PULSE: {
+        _trajectory: 'PULSE',           // concentric beat rings from the center
+        _palette: { mode: 'SINGLE', singleHue: 0.55, singleRange: 0.12 }, // electric cyan
+        DENSITY_DISSIPATION: 1.8,      // rings flash and clear quickly
+        VELOCITY_DISSIPATION: 1.1,     // shockwave travels briefly, then stills
+        PRESSURE: 0.9,
+        CURL: 3,                       // almost none — rings stay crisp
+        SPLAT_RADIUS: 0.10,
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.8,
+        BLOOM_THRESHOLD: 0.5,
         SUNRAYS: false,
         SUNRAYS_WEIGHT: 0.5,
         SHADING: true,
@@ -2220,12 +2430,15 @@ const STRINGS = {
         'Settings': '设置',
         'present': '展示',
         'OFF': '关',
-        'Default': '默认',
         'Smoke': '烟雾',
         'Ink': '墨色',
         'Rainbow': '彩虹',
         'Aqua': '水母',
         'Blink': '涟漪',
+        'Vortex': '漩涡',
+        'Kaleido': '万花筒',
+        'Comet': '流星',
+        'Pulse': '脉冲',
         'None': '无',
         'Frost': '磨砂',
         'Dream': '梦境',
@@ -2354,6 +2567,10 @@ const STRINGS = {
         'SINE_WAVE': '正弦波',
         'AQUA': '水母',
         'BLINK': '涟漪',
+        'VORTEX': '漩涡',
+        'KALEIDO': '万花筒',
+        'COMET': '流星',
+        'PULSE': '脉冲',
         'Band threshold': '频段阈值',
         'Splat force': '喷溅力度',
         'Volume gain': '音量增益',
@@ -2436,8 +2653,8 @@ const STRINGS = {
         'Extra Gaussian blur layered on top of the displaced canvas. 0 = sharp glass, 2+ = thick frosted look. Mostly used by MOLTEN; great companion to all glass modes.':
             '叠加在位移后画面之上的额外高斯模糊。0 = 锐利玻璃,2+ = 厚磨砂感。主要用于熔融效果,也适合所有玻璃模式。',
 
-        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = concentric ring ripples at random points across the surface.':
-            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。水母 = 气泡从底部上升。涟漪 = 在画面随机点的同心环涟漪。',
+        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = raindrop ripples at random points. VORTEX = one coherent whirlpool around the center. KALEIDO = 6-fold mirrored mandala. COMET = meteor streaks across the sky. PULSE = concentric beat rings from the center.':
+            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。水母 = 气泡从底部上升。涟漪 = 随机位置的雨滴涟漪。漩涡 = 围绕中心的整体涡旋。万花筒 = 六重镜像曼陀罗。流星 = 划过天际的流星。脉冲 = 从中心扩散的节拍圆环。',
         'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).':
             '低于此阈值的频段会被忽略。调高以过滤背景噪声(房间嗡嗡声、微弱的麦克风拾音)。',
         'How hard each frame pushes the fluid. Higher = more violent motion. The main "intensity" knob.':
@@ -2468,12 +2685,12 @@ const STRINGS = {
             '冻结模拟。喷溅继续注入但运动停止。快捷键:P。',
         'Manually fire a multi-splat burst. Useful when testing visuals without audio. Shortcut: Space.':
             '手动触发多重喷溅爆发。无音频测试视觉时有用。快捷键:空格。',
-        'Restore all Simulation + Effects values to the current preset (DEFAULT / SMOKE / INK / RAINBOW). Audio knobs are not touched.':
-            '将所有模拟 + 视觉效果值恢复到当前预设(默认 / 烟雾 / 墨色 / 彩虹)。音频调节不变。',
+        'Restore all Simulation + Effects values to the current mode preset. Audio knobs are not touched.':
+            '将所有模拟 + 视觉效果值恢复到当前模式预设。音频调节不变。',
         'Persist every current panel value (fluid + audio + trajectory + filter + glass) to this browser. Next page load will start from this snapshot instead of the factory DEFAULT.':
             '将当前面板所有值(流体 + 音频 + 轨迹 + 滤镜 + 玻璃)持久化到此浏览器。下次加载将从此快照开始,而非出厂默认。',
-        'Clear the saved snapshot from this browser and reload. Page will come back up with the factory DEFAULT preset.':
-            '清除此浏览器中保存的快照并重新加载。页面将以出厂默认预设重新启动。',
+        'Clear the saved snapshot from this browser and reload. Page will come back up with the factory defaults.':
+            '清除此浏览器中保存的快照并重新加载。页面将以出厂默认设置重新启动。',
         'Copy the current panel state to your clipboard as a JSON object. Use this to share a configuration or paste into source code as a new factory default.':
             '将当前面板状态作为 JSON 对象复制到剪贴板。用于分享配置或作为新出厂默认粘贴到源代码。',
         'Download the current panel state as swirl-settings.json. Unlike "Save as default" (this browser only), the file works across devices, browsers and after clearing site data — re-load it any time with "Import settings".':
@@ -2632,8 +2849,8 @@ const PANEL_SCHEMA = [
         title: 'Audio → Fluid',
         items: [
             { type: 'select', label: 'Trajectory',
-              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA', 'BLINK'],
-              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = concentric ring ripples at random points across the surface.',
+              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA', 'BLINK', 'VORTEX', 'KALEIDO', 'COMET', 'PULSE'],
+              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = raindrop ripples at random points. VORTEX = one coherent whirlpool around the center. KALEIDO = 6-fold mirrored mandala. COMET = meteor streaks across the sky. PULSE = concentric beat rings from the center.',
               get: () => currentTrajectory, set: v => currentTrajectory = v },
             { type: 'range', label: 'Band threshold', min: 0,    max: 0.3,  step: 0.005,
               tip: 'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).',
@@ -2695,7 +2912,7 @@ const PANEL_SCHEMA = [
               tip: 'Manually fire a multi-splat burst. Useful when testing visuals without audio. Shortcut: Space.',
               action: () => splatStack.push(Math.floor(Math.random() * 20) + 5) },
             { type: 'button', label: 'Reset preset',
-              tip: 'Restore all Simulation + Effects values to the current preset (DEFAULT / SMOKE / INK / RAINBOW). Audio knobs are not touched.',
+              tip: 'Restore all Simulation + Effects values to the current mode preset. Audio knobs are not touched.',
               action: () => applyPreset(currentPresetName) },
             { type: 'button', label: 'Save as default',
               tip: 'Persist every current panel value (fluid + audio + trajectory + filter + glass) to this browser. Next page load will start from this snapshot instead of the factory DEFAULT.',
@@ -2707,7 +2924,7 @@ const PANEL_SCHEMA = [
                   }
               } },
             { type: 'button', label: 'Reset to factory',
-              tip: 'Clear the saved snapshot from this browser and reload. Page will come back up with the factory DEFAULT preset.',
+              tip: 'Clear the saved snapshot from this browser and reload. Page will come back up with the factory defaults.',
               action: () => resetSettingsToFactory() },
             { type: 'button', label: 'Copy settings as JSON',
               tip: 'Copy the current panel state to your clipboard as a JSON object. Use this to share a configuration or paste into source code as a new factory default.',
@@ -2961,7 +3178,14 @@ function applySettings (s) {
     if (s.PALETTE)       Object.assign(PALETTE, s.PALETTE);
     if (s.filterState)   Object.assign(filterState, s.filterState);
     if (typeof s.currentTrajectory === 'string')  currentTrajectory  = s.currentTrajectory === 'RAIN' ? 'BLINK' : s.currentTrajectory;
-    if (typeof s.currentPresetName === 'string')  currentPresetName  = s.currentPresetName === 'RAIN' ? 'BLINK' : s.currentPresetName;
+    if (typeof s.currentPresetName === 'string') {
+        // Migrate renamed/removed preset names from old snapshots:
+        // RAIN became BLINK; DEFAULT was merged into RAINBOW.
+        let n = s.currentPresetName;
+        if (n === 'RAIN') n = 'BLINK';
+        if (n === 'DEFAULT') n = 'RAINBOW';
+        currentPresetName = PRESETS[n] ? n : 'RAINBOW';
+    }
     return true;
 }
 
