@@ -2073,7 +2073,13 @@ function applyFilter () {
             turb.setAttribute('numOctaves', String(Math.max(1, filterState.octaves | 0)));
             turb.setAttribute('seed', String(filterState.seed | 0));
         }
-        if (disp) disp.setAttribute('scale', String(def.baseScale * filterState.intensity / 50));
+        if (disp) {
+            // Nonlinear intensity response: unchanged at 50, gentler below,
+            // and considerably more dramatic toward 100 — the old linear
+            // curve topped out at a tame 2× displacement.
+            const k = Math.pow(filterState.intensity / 50, 1.35);
+            disp.setAttribute('scale', String(def.baseScale * k));
+        }
         if (blur) blur.setAttribute('stdDeviation', String(filterState.blur));
     } else {
         canvas.style.filter = '';
