@@ -186,58 +186,122 @@
             opacity: 0;
         }
 
-        /* Frost — frosted glass blur over the fluid (the "磨砂" effect) */
+        /* Frost — true frosted glass: strong blur, milky veil, icy micro-
+           texture. The texture + veil give it a physical "pane" identity
+           that plain blur lacked. */
         .filter-overlay[data-filter="FROST"] {
             backdrop-filter:
-                blur(calc(var(--filter-strength) * 0.4px))
-                brightness(0.96)
-                saturate(0.92);
+                blur(calc(var(--filter-strength) * 0.5px))
+                brightness(1.04)
+                saturate(0.8)
+                contrast(0.97);
             -webkit-backdrop-filter:
-                blur(calc(var(--filter-strength) * 0.4px))
-                brightness(0.96)
-                saturate(0.92);
-            background: rgba(253, 252, 252, 0.02);
+                blur(calc(var(--filter-strength) * 0.5px))
+                brightness(1.04)
+                saturate(0.8)
+                contrast(0.97);
+            background:
+                url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'><filter id='f'><feTurbulence type='fractalNoise' baseFrequency='0.55' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23f)'/></svg>") repeat,
+                linear-gradient(
+                    rgba(253, 252, 252, calc(var(--filter-strength) * 0.0014)),
+                    rgba(253, 252, 252, calc(var(--filter-strength) * 0.0014)));
+            background-size: 160px 160px, auto;
         }
 
-        /* Dream — heavier blur + boosted saturation/brightness, hazier */
+        /* Dream — heavy bloom-like blur, oversaturated, with a slow
+           breathing hue drift so the whole scene gently shifts color. */
         .filter-overlay[data-filter="DREAM"] {
             backdrop-filter:
-                blur(calc(var(--filter-strength) * 0.8px))
-                saturate(calc(1 + var(--filter-strength) * 0.012))
-                brightness(calc(1 + var(--filter-strength) * 0.003));
+                blur(calc(var(--filter-strength) * 0.9px))
+                saturate(calc(1 + var(--filter-strength) * 0.018))
+                brightness(calc(1 + var(--filter-strength) * 0.004))
+                hue-rotate(0deg);
             -webkit-backdrop-filter:
-                blur(calc(var(--filter-strength) * 0.8px))
-                saturate(calc(1 + var(--filter-strength) * 0.012))
-                brightness(calc(1 + var(--filter-strength) * 0.003));
+                blur(calc(var(--filter-strength) * 0.9px))
+                saturate(calc(1 + var(--filter-strength) * 0.018))
+                brightness(calc(1 + var(--filter-strength) * 0.004))
+                hue-rotate(0deg);
+            animation: dream-hue 16s ease-in-out infinite;
+        }
+        @keyframes dream-hue {
+            0%, 100% {
+                backdrop-filter:
+                    blur(calc(var(--filter-strength) * 0.9px))
+                    saturate(calc(1 + var(--filter-strength) * 0.018))
+                    brightness(calc(1 + var(--filter-strength) * 0.004))
+                    hue-rotate(-14deg);
+                -webkit-backdrop-filter:
+                    blur(calc(var(--filter-strength) * 0.9px))
+                    saturate(calc(1 + var(--filter-strength) * 0.018))
+                    brightness(calc(1 + var(--filter-strength) * 0.004))
+                    hue-rotate(-14deg);
+            }
+            50% {
+                backdrop-filter:
+                    blur(calc(var(--filter-strength) * 0.9px))
+                    saturate(calc(1 + var(--filter-strength) * 0.018))
+                    brightness(calc(1 + var(--filter-strength) * 0.004))
+                    hue-rotate(16deg);
+                -webkit-backdrop-filter:
+                    blur(calc(var(--filter-strength) * 0.9px))
+                    saturate(calc(1 + var(--filter-strength) * 0.018))
+                    brightness(calc(1 + var(--filter-strength) * 0.004))
+                    hue-rotate(16deg);
+            }
         }
 
-        /* Grain — fractal-noise SVG tiled and blended over the canvas */
+        /* Grain — animated film grain. `screen` blend (not overlay): the
+           canvas is mostly black and overlay-on-black is invisible; screen
+           adds the noise as faint sparkle everywhere, like projected film.
+           The jitter animation makes it read as grain instead of a static
+           texture stuck to the screen. */
         .filter-overlay[data-filter="GRAIN"] {
             background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.8 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
             background-size: 240px 240px;
-            mix-blend-mode: overlay;
-            opacity: calc(var(--filter-strength) * 0.01);
+            mix-blend-mode: screen;
+            opacity: calc(var(--filter-strength) * 0.006);
+            backdrop-filter: contrast(1.08);
+            -webkit-backdrop-filter: contrast(1.08);
+            animation: grain-jitter 0.7s steps(1, end) infinite;
+        }
+        @keyframes grain-jitter {
+            0%   { background-position: 0 0; }
+            20%  { background-position: -28px 14px; }
+            40%  { background-position: 16px -22px; }
+            60%  { background-position: -10px -32px; }
+            80%  { background-position: 26px 18px; }
+            100% { background-position: 0 0; }
         }
 
-        /* Vignette — radial darkening from edges inward */
+        /* Vignette — cinematic lens: much steeper darkening that reaches
+           toward the middle, plus a slight center brightness/saturation
+           lift so the eye is pulled in (edges of a black canvas alone
+           barely showed the old gradient). */
         .filter-overlay[data-filter="VIGNETTE"] {
             background: radial-gradient(
                 ellipse at center,
-                transparent 35%,
-                rgba(0, 0, 0, calc(var(--filter-strength) * 0.012)) 100%
+                transparent 14%,
+                rgba(0, 0, 0, calc(var(--filter-strength) * 0.007)) 52%,
+                rgba(0, 0, 0, calc(var(--filter-strength) * 0.019)) 100%
             );
+            backdrop-filter: brightness(1.05) saturate(1.12);
+            -webkit-backdrop-filter: brightness(1.05) saturate(1.12);
         }
 
-        /* Halftone — tiny dot grid blended via multiply, retro print look */
+        /* Halftone — print dots that actually bite: dot size grows with
+           strength inside a fixed grid (instead of a tiny fixed dot), and
+           a backdrop contrast boost gives the inky print look. */
         .filter-overlay[data-filter="HALFTONE"] {
             background-image: radial-gradient(
                 circle at center,
-                rgba(0, 0, 0, 0.9) 1px,
-                transparent 1.4px
+                rgba(0, 0, 0, 0.95) calc(0.8px + var(--filter-strength) * 0.016px),
+                transparent calc(1.3px + var(--filter-strength) * 0.016px)
             );
-            background-size: calc(8px - var(--filter-strength) * 0.03px) calc(8px - var(--filter-strength) * 0.03px);
+            background-size: 7px 7px;
             mix-blend-mode: multiply;
-            opacity: calc(0.2 + var(--filter-strength) * 0.008);
+            opacity: calc(0.3 + var(--filter-strength) * 0.007);
+            backdrop-filter: contrast(calc(1 + var(--filter-strength) * 0.005)) brightness(1.06);
+            -webkit-backdrop-filter: contrast(calc(1 + var(--filter-strength) * 0.005)) brightness(1.06);
         }
 
         .footer-left, .footer-center, .mic-status {

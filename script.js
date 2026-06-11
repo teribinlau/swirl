@@ -2073,7 +2073,13 @@ function applyFilter () {
             turb.setAttribute('numOctaves', String(Math.max(1, filterState.octaves | 0)));
             turb.setAttribute('seed', String(filterState.seed | 0));
         }
-        if (disp) disp.setAttribute('scale', String(def.baseScale * filterState.intensity / 50));
+        if (disp) {
+            // Nonlinear intensity response: unchanged at 50, gentler below,
+            // and considerably more dramatic toward 100 — the old linear
+            // curve topped out at a tame 2× displacement.
+            const k = Math.pow(filterState.intensity / 50, 1.35);
+            disp.setAttribute('scale', String(def.baseScale * k));
+        }
         if (blur) blur.setAttribute('stdDeviation', String(filterState.blur));
     } else {
         canvas.style.filter = '';
@@ -2235,12 +2241,12 @@ const PRESETS = {
     SMOKE: {
         _trajectory: 'RANDOM',
         _palette: { mode: 'MONO' },    // monochrome plumes — actual smoke
-        DENSITY_DISSIPATION: 0.4,
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.6,
         PRESSURE: 0.6,
-        CURL: 12,
-        SPLAT_RADIUS: 0.45,
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.5,
         BLOOM_THRESHOLD: 0.7,
         SUNRAYS: false,
@@ -2250,11 +2256,11 @@ const PRESETS = {
     INK: {
         _trajectory: 'RANDOM',
         _palette: { mode: 'SINGLE', singleHue: 0.60, singleRange: 0.06 }, // deep indigo ink-in-water
-        DENSITY_DISSIPATION: 2.2,
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.05,
         PRESSURE: 0.95,
-        CURL: 45,
-        SPLAT_RADIUS: 0.18,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
         BLOOM: false,
         BLOOM_INTENSITY: 0.4,
         BLOOM_THRESHOLD: 0.6,
@@ -2265,12 +2271,12 @@ const PRESETS = {
     RAINBOW: {
         _trajectory: 'RANDOM',
         _palette: { mode: 'FULL' },    // the full-spectrum showcase
-        DENSITY_DISSIPATION: 0.8,
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.15,
         PRESSURE: 0.8,
-        CURL: 40,
-        SPLAT_RADIUS: 0.30,
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 1.4,
         BLOOM_THRESHOLD: 0.45,
         SUNRAYS: true,
@@ -2280,12 +2286,12 @@ const PRESETS = {
     AQUA: {
         _trajectory: 'AQUA',           // behavioural preset — forces rising-bubble trajectory
         _palette: { mode: 'SINGLE', singleHue: 0.5, singleRange: 0.30 },  // default aqua palette
-        DENSITY_DISSIPATION: 1.6,      // bubbles fade before reaching the top, but not too fast
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.5,     // moderate damping — bubbles slow as they rise
         PRESSURE: 0.8,
-        CURL: 22,                      // strong curl gives each bubble internal swirl (jellyfish-ish)
-        SPLAT_RADIUS: 0.28,            // medium bubble size
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.55,
         BLOOM_THRESHOLD: 0.55,
         SUNRAYS: false,                // sunrays scramble the up-direction
@@ -2293,14 +2299,14 @@ const PRESETS = {
         SHADING: true,
     },
     BLINK: {
-        _trajectory: 'BLINK',           // behavioural preset — concentric ring blinks at random points
+        _trajectory: 'BLINK',           // behavioural preset — raindrop ripples at random points
         _palette: { mode: 'MONO' },    // greyscale rings on dark surface (override per palette panel)
-        DENSITY_DISSIPATION: 1.4,      // ripple ink fades after the ring expands
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.7,     // low damping — let the ring keep expanding outward
         PRESSURE: 0.85,                // mid — incompressible water-surface feel
-        CURL: 5,                       // very low — clean radial expansion, no swirl
-        SPLAT_RADIUS: 0.10,            // base; sets the ring's cross-section width
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.55,
         BLOOM_THRESHOLD: 0.55,
         SUNRAYS: false,
@@ -2310,12 +2316,12 @@ const PRESETS = {
     VORTEX: {
         _trajectory: 'VORTEX',          // one coherent whirlpool around the center
         _palette: { mode: 'SINGLE', singleHue: 0.74, singleRange: 0.22 }, // violet galaxy
-        DENSITY_DISSIPATION: 0.75,     // arms persist long enough to wind up
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.06,    // near-frictionless — rotation accumulates
         PRESSURE: 0.85,
-        CURL: 38,                      // high curl shreds the arms into eddies
-        SPLAT_RADIUS: 0.22,
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.7,
         BLOOM_THRESHOLD: 0.5,
         SUNRAYS: false,
@@ -2325,12 +2331,12 @@ const PRESETS = {
     KALEIDO: {
         _trajectory: 'KALEIDO',         // 6-fold mirrored mandala around the center
         _palette: { mode: 'FULL' },    // rainbow petals
-        DENSITY_DISSIPATION: 1.2,      // patterns refresh before they smear
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.4,
         PRESSURE: 0.8,
-        CURL: 25,
-        SPLAT_RADIUS: 0.20,
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.7,
         BLOOM_THRESHOLD: 0.55,
         SUNRAYS: false,
@@ -2340,12 +2346,12 @@ const PRESETS = {
     COMET: {
         _trajectory: 'COMET',           // meteor streaks across the sky
         _palette: { mode: 'SINGLE', singleHue: 0.08, singleRange: 0.08 }, // golden-orange fire
-        DENSITY_DISSIPATION: 0.9,      // tails linger, then fade
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 1.3,     // push is local & transient — clean streaks, no soup
         PRESSURE: 0.7,
-        CURL: 8,                       // low — keep trails linear, not curly
-        SPLAT_RADIUS: 0.12,            // thin, bright heads
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.9,
         BLOOM_THRESHOLD: 0.5,
         SUNRAYS: false,
@@ -2355,12 +2361,12 @@ const PRESETS = {
     PULSE: {
         _trajectory: 'PULSE',           // concentric beat rings from the center
         _palette: { mode: 'SINGLE', singleHue: 0.55, singleRange: 0.12 }, // electric cyan
-        DENSITY_DISSIPATION: 1.8,      // rings flash and clear quickly
+        DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 1.1,     // shockwave travels briefly, then stills
         PRESSURE: 0.9,
-        CURL: 3,                       // almost none — rings stay crisp
-        SPLAT_RADIUS: 0.10,
-        BLOOM: true,
+        CURL: 1,
+        SPLAT_RADIUS: 0.3,
+        BLOOM: false,
         BLOOM_INTENSITY: 0.8,
         BLOOM_THRESHOLD: 0.5,
         SUNRAYS: false,
