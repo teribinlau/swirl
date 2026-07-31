@@ -1562,6 +1562,21 @@ class AudioAnalyzer {
         this._nextSourceId = 1;
         this.currentDeviceId = null;     // last mic device added (for device-picker highlight)
         this.onSourcesChanged = null;    // UI callback: a source was added / removed / ended
+
+        // iOS/Safari suspend the AudioContext on tab switch, screen lock or
+        // an incoming call (state becomes 'suspended', or WebKit's private
+        // 'interrupted') and don't reliably resume it — the page comes back
+        // with a silent analyser. Nudge it awake whenever the page becomes
+        // active again, and on the next touch as a belt-and-braces fallback.
+        const tryResume = () => {
+            if (this.ctx && this.ctx.state !== 'running') {
+                this.ctx.resume().catch(() => {});
+            }
+        };
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) tryResume(); });
+        window.addEventListener('pageshow', tryResume);
+        window.addEventListener('focus', tryResume);
+        document.addEventListener('touchend', tryResume, { passive: true });
     }
 
     async _ensureContext () {
@@ -1660,20 +1675,38 @@ class AudioAnalyzer {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error('NO_MEDIA_DEVICES');       // in-app webview / unsupported browser
         }
-        await this._ensureContext();
-        this._initAnalyserOnce();
         const audioConstraints = {
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
         };
         if (deviceId) audioConstraints.deviceId = { exact: deviceId };
+        // getUserMedia FIRST, before any other await — Safari (iOS and macOS)
+        // only shows the permission prompt inside a user activation, and
+        // awaiting AudioContext setup first can drop out of it.
         const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
-        this.currentDeviceId = deviceId || (stream.getAudioTracks()[0].getSettings().deviceId);
+        // Create the AudioContext AFTER the mic is live. WebKit locks the
+        // context to the hardware sample rate at construction; on iOS the
+        // audio route often switches when the mic activates (e.g. 48000 →
+        // 44100), and a context built on the old rate reads pure silence
+        // from createMediaStreamSource. If a context already exists at the
+        // wrong rate and nothing else is using it, rebuild it.
+        const track = stream.getAudioTracks()[0];
+        const settings = track.getSettings ? track.getSettings() : {};
+        if (this.ctx && this.sources.length === 0 &&
+            settings.sampleRate && this.ctx.sampleRate !== settings.sampleRate) {
+            try { this.ctx.close(); } catch (e) {}
+            this.ctx = null;
+            this.analyser = null;      // rebuild analyser + mix bus on the new context
+            this.mixBus = null;
+            this.bandBinRanges = [];
+        }
+        await this._ensureContext();
+        this._initAnalyserOnce();
+        this.currentDeviceId = deviceId || settings.deviceId;
         const node = this.ctx.createMediaStreamSource(stream);
         // Pick a friendlier label from the device's actual name if available
-        const trackLabel = stream.getAudioTracks()[0].label;
-        const label = trackLabel ? trackLabel.toUpperCase().slice(0, 24) : 'MIC';
+        const label = track.label ? track.label.toUpperCase().slice(0, 24) : 'MIC';
         const src = this._registerSource({ kind: 'mic', node, label, stream });
         stream.getAudioTracks().forEach(t => {
             t.onended = () => this._onSourceTrackEnded(src.id);
