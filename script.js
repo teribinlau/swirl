@@ -188,6 +188,16 @@ function isIOS () {
     return navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
 }
 
+// Desktop Safari ALSO blocks getUserMedia outside a user gesture, and it has
+// no Permissions API 'microphone' query to tell "needs a tap" apart from
+// "denied" — so treat every Safari like iOS: never auto-start the mic,
+// always start from the user's tap. (Chrome on iOS reports CriOS, Edge EdgiOS
+// — they inherit WebKit's rules anyway via isIOS.)
+function isSafari () {
+    const ua = navigator.userAgent;
+    return /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR/i.test(ua);
+}
+
 function captureScreenshot () {
     let res = getResolution(config.CAPTURE_RESOLUTION);
     let target = createFBO(res.width, res.height, ext.formatRGBA.internalFormat, ext.formatRGBA.format, ext.halfFloatTexType, gl.NEAREST);
@@ -1684,7 +1694,22 @@ class AudioAnalyzer {
         // getUserMedia FIRST, before any other await — Safari (iOS and macOS)
         // only shows the permission prompt inside a user activation, and
         // awaiting AudioContext setup first can drop out of it.
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        let stream;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+        } catch (err) {
+            // Safari can choke on the audio-processing constraints themselves
+            // and report "no input found" even though a mic exists — retry
+            // once with the plainest possible request before giving up.
+            const n = err && err.name;
+            if (n === 'OverconstrainedError' || n === 'NotFoundError' || n === 'TypeError') {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+                });
+            } else {
+                throw err;
+            }
+        }
         // Create the AudioContext AFTER the mic is live. WebKit locks the
         // context to the hardware sample rate at construction; on iOS the
         // audio route often switches when the mic activates (e.g. 48000 →
@@ -2517,8 +2542,8 @@ const STRINGS = {
             '麦克风需要 HTTPS 或 localhost。本页两者都不是,所以被浏览器屏蔽。请打开 HTTPS 链接,或用本地服务器运行。',
         'This browser blocks microphone access. If you opened the link inside an app (WeChat, etc.), tap ⋯ and "Open in browser" — use Chrome, Edge or Safari.':
             '此浏览器禁用了麦克风访问。如果你是在 App 内(如微信)打开的链接,请点右上角 ⋯ 选择"在浏览器打开" —— 用 Chrome、Edge 或 Safari。',
-        'Microphone permission is blocked. Click the 🔒 / camera icon in the address bar, set Microphone to Allow, then reload.':
-            '麦克风权限已被阻止。请点击地址栏的 🔒 / 摄像头图标,把"麦克风"设为"允许",然后刷新页面。',
+        'Microphone access is blocked for this site. Chrome/Edge: click the 🔒 icon in the address bar and allow Microphone. Safari: menu Safari → Settings → Websites → Microphone → Allow; also check macOS System Settings → Privacy & Security → Microphone. Then reload.':
+            '此网站的麦克风访问已被拦截。Chrome/Edge:点击地址栏 🔒 图标,允许麦克风。Safari:菜单 Safari → 设置 → 网站 → 麦克风 → 允许;并检查 macOS 系统设置 → 隐私与安全性 → 麦克风。然后刷新页面。',
         'Tap the Microphone button below to start — the browser only turns the mic on after you tap.':
             '请点击下方的"麦克风"按钮开始 —— 浏览器只有在你点击之后才会开启麦克风。',
         // ── Mixer ───────────────────────────────────────────────
@@ -3583,7 +3608,10 @@ window.addEventListener('DOMContentLoaded', () => {
     // 3s safety-net timer below won't clobber it with a generic message.
     let micErrorShown = false;
 
-    async function pickSource (kind, file, deviceId) {
+    // fromGesture: false only for the page-load auto-start. Every button /
+    // picker path is a real user activation, so a NotAllowedError there
+    // means genuinely blocked — not "just needs a tap".
+    async function pickSource (kind, file, deviceId, fromGesture = true) {
         micErrorShown = false;
         srcBtns.forEach(b => b.disabled = true);
         setHint(t('Requesting…'));
@@ -3626,16 +3654,21 @@ window.addEventListener('DOMContentLoaded', () => {
                 } else if (kind === 'file') {
                     text = t('Couldn’t play that file. Tap + File and pick an audio file again.');
                 } else {
-                    // mic: truly blocked vs just needs a user gesture (mobile).
-                    // The Permissions API tells them apart so the hint is actionable.
+                    // mic: truly blocked vs just needs a user gesture.
+                    // Chrome & co expose the Permissions API; Safari rejects
+                    // the 'microphone' query entirely, so there fall back on
+                    // fromGesture — a denial DURING a real user tap can only
+                    // mean the permission is actually blocked, and showing
+                    // "tap to start" again would loop the user forever.
                     let permState = null;
                     try {
                         if (navigator.permissions && navigator.permissions.query) {
                             permState = (await navigator.permissions.query({ name: 'microphone' })).state;
                         }
                     } catch (_) { /* Safari etc. may reject the 'microphone' name */ }
-                    text = permState === 'denied'
-                        ? t('Microphone permission is blocked. Click the 🔒 / camera icon in the address bar, set Microphone to Allow, then reload.')
+                    const blocked = permState === 'denied' || (permState === null && fromGesture);
+                    text = blocked
+                        ? t('Microphone access is blocked for this site. Chrome/Edge: click the 🔒 icon in the address bar and allow Microphone. Safari: menu Safari → Settings → Websites → Microphone → Allow; also check macOS System Settings → Privacy & Security → Microphone. Then reload.')
                         : t('Tap the Microphone button below to start — the browser only turns the mic on after you tap.');
                 }
             } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
@@ -3726,16 +3759,16 @@ window.addEventListener('DOMContentLoaded', () => {
     // pickSource() re-shows the overlay only if mic start fails.
     renderMixer();   // show the SOURCES panel section up-front (even before/if mic starts)
 
-    // iOS / iPadOS Safari blocks both getUserMedia and AudioContext.resume()
-    // outside a user gesture, so auto-start always fails and the 3s safety
-    // net then shows a misleading "didn't start" error. Skip auto-start on
-    // iOS and let the user tap Microphone — that tap is the gesture Safari
-    // needs.
-    if (isIOS()) {
+    // Safari — iOS, iPadOS AND macOS — blocks getUserMedia outside a user
+    // gesture, so auto-start always fails there (and on the Mac it left
+    // users looping between a doomed auto-attempt and the start overlay).
+    // Skip auto-start on all Safari and let the user tap Microphone — that
+    // tap is the gesture WebKit needs.
+    if (isIOS() || isSafari()) {
         overlay.classList.remove('hidden');
         setHint(t('Tap the Microphone button below to start — the browser only turns the mic on after you tap.'));
     } else {
-        pickSource('mic');
+        pickSource('mic', null, null, false);
 
         // Safety net: if the mic hasn't started within 3s (browser silently
         // blocked the prompt, or HTTPS not available, or user dismissed it),
