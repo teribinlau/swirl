@@ -198,6 +198,13 @@ function isSafari () {
     return /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR/i.test(ua);
 }
 
+// macOS (not iOS). Display-capture audio rules differ per OS: on a Mac no
+// browser can capture whole-screen/window audio — only Chrome/Edge TAB
+// shares carry audio — while on Windows "entire screen + share audio" works.
+function isMacPlatform () {
+    return /Mac/i.test(navigator.platform) && !isIOS();
+}
+
 function captureScreenshot () {
     let res = getResolution(config.CAPTURE_RESOLUTION);
     let target = createFBO(res.width, res.height, ext.formatRGBA.internalFormat, ext.formatRGBA.format, ext.halfFloatTexType, gl.NEAREST);
@@ -1769,12 +1776,20 @@ class AudioAnalyzer {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
             throw new Error('UNSUPPORTED');
         }
-        await this._ensureContext();
-        this._initAnalyserOnce();
-        const stream = await navigator.mediaDevices.getDisplayMedia({
+        // Picker first (user-gesture safety, same as addMicrophone), and
+        // shape it toward choices that actually carry audio: hide this page's
+        // own tab, and on macOS hide "Entire screen" — no browser can capture
+        // whole-screen audio on a Mac, only TAB shares have audio there.
+        // Unknown dictionary members are ignored by other browsers.
+        const displayOpts = {
             video: true,            // required by spec even though we only want audio
             audio: true,
-        });
+            selfBrowserSurface: 'exclude',
+        };
+        if (isMacPlatform()) displayOpts.monitorTypeSurfaces = 'exclude';
+        const stream = await navigator.mediaDevices.getDisplayMedia(displayOpts);
+        await this._ensureContext();
+        this._initAnalyserOnce();
         // Drop video tracks immediately to save GPU/network
         stream.getVideoTracks().forEach(t => t.stop());
         if (stream.getAudioTracks().length === 0) {
@@ -2530,6 +2545,8 @@ const STRINGS = {
 
         // ── Status / hint messages ──────────────────────────────
         'Not supported in this browser — try Chrome or Edge': '此浏览器不支持 — 请试用 Chrome 或 Edge',
+        'Safari can’t capture tab / system audio — use Chrome or Edge, or add an audio file.':
+            'Safari 无法捕获标签页 / 系统音频 —— 请改用 Chrome 或 Edge,或添加音频文件。',
         'Loading devices…': '加载设备中…',
         'Microphone permission denied — needed to list devices.': '麦克风权限被拒绝 — 列出设备需要权限。',
         'Could not list audio devices.': '无法列出音频设备。',
@@ -2537,6 +2554,8 @@ const STRINGS = {
         'Requesting…': '请求中…',
         'This browser does not support tab / system audio capture.': '此浏览器不支持标签 / 系统音频捕获。',
         'No audio captured. Check "Share audio" when picking the source.': '未捕获到音频。选择源时请勾选"共享音频"。',
+        'No audio in that share. On a Mac, choose a browser TAB (not a window or the screen) and tick "Also share tab audio".':
+            '这次共享没有音频。Mac 上只有共享浏览器"标签页"才带声音(窗口 / 整个屏幕都不行),选标签页并勾选"同时共享标签页音频"。',
         'Permission denied. Allow access in your browser and try again.': '权限被拒绝。请在浏览器中允许访问后重试。',
         'Microphone needs HTTPS or localhost. This page is on neither, so the browser blocks it. Open the HTTPS link or run a local server.':
             '麦克风需要 HTTPS 或 localhost。本页两者都不是,所以被浏览器屏蔽。请打开 HTTPS 链接,或用本地服务器运行。',
@@ -3401,14 +3420,22 @@ window.addEventListener('DOMContentLoaded', () => {
     const deviceList = document.getElementById('device-list');
     const deviceBackBtn = document.getElementById('device-back');
 
-    // Disable unsupported source buttons up-front
+    // Disable unsupported source buttons up-front. Safari HAS getDisplayMedia
+    // but never delivers audio tracks from it (WebKit doesn't implement
+    // display-capture audio), so the button would always dead-end there.
     const displayBtn = document.querySelector('.src-btn[data-source="display"]');
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || isSafari()) {
         displayBtn.disabled = true;
+        // permaDisabled keeps showOverlay()'s blanket re-enable from
+        // resurrecting the button after an unrelated error.
+        displayBtn.dataset.permaDisabled = '1';
         // Tag with i18n key so applyLanguage() can re-render on toggle
         const hintEl = displayBtn.querySelector('.src-hint');
-        hintEl.dataset.i18n = 'Not supported in this browser — try Chrome or Edge';
-        hintEl.textContent = t('Not supported in this browser — try Chrome or Edge');
+        const key = isSafari()
+            ? 'Safari can’t capture tab / system audio — use Chrome or Edge, or add an audio file.'
+            : 'Not supported in this browser — try Chrome or Edge';
+        hintEl.dataset.i18n = key;
+        hintEl.textContent = t(key);
     }
 
     function setHint (msg, isError) {
@@ -3519,7 +3546,7 @@ window.addEventListener('DOMContentLoaded', () => {
             });
             return b;
         };
-        const noDisplay = !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia;
+        const noDisplay = !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || isSafari();
         add.appendChild(mkAdd(t('+ Mic'), 'mic', false));
         add.appendChild(mkAdd(t('+ System'), 'display', noDisplay));
         add.appendChild(mkAdd(t('+ File'), 'file', false));
@@ -3647,7 +3674,11 @@ window.addEventListener('DOMContentLoaded', () => {
             } else if (msg === 'UNSUPPORTED') {
                 text = t('This browser does not support tab / system audio capture.');
             } else if (msg === 'NO_AUDIO_TRACK') {
-                text = t('No audio captured. Check "Share audio" when picking the source.');
+                // macOS can only deliver audio from TAB shares; picking a
+                // window (or screen, on other browsers) silently drops audio.
+                text = isMacPlatform()
+                    ? t('No audio in that share. On a Mac, choose a browser TAB (not a window or the screen) and tick "Also share tab audio".')
+                    : t('No audio captured. Check "Share audio" when picking the source.');
             } else if (name === 'NotAllowedError' || name === 'SecurityError') {
                 if (kind === 'display') {
                     text = t('Screen / tab share was cancelled or denied. Click + System again and remember to tick "Share audio".');
