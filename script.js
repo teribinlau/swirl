@@ -55,6 +55,9 @@ let config = {
     SUNRAYS: false,
     SUNRAYS_RESOLUTION: 196,
     SUNRAYS_WEIGHT: 0.4,
+    MATERIAL: 'DEFAULT',      // how the dye is shaded: 'DEFAULT' | 'CHROME' | 'OIL' (see SURFACES)
+    MATERIAL_RELIEF: 5,       // CHROME / OIL: how strongly density tilts the surface
+    MATERIAL_TINT: 0.4,       // CHROME / OIL: how much of the dye colour the surface keeps
 }
 
 function pointerPrototype () {
@@ -532,6 +535,203 @@ const displayShaderSource = `
     }
 `;
 
+// ============================================================
+// SURFACE MATERIALS (config.MATERIAL → SURFACES)
+// Alternative display shader: instead of glowing pigment, the dye is read as
+// the thickness of a liquid film. Screen-space normals come from the density
+// gradient and the surface mirrors a small procedural studio (graded sky, an
+// overhead softbox, a warm and a cool side strip).
+//   CHROME — high Fresnel reflectance, no body colour: liquid metal
+//   OIL    — low reflectance, body lit through a thin-film interference
+//            palette that cycles with film thickness and viewing angle
+// Output is premultiplied (rgb * mask, mask), so it blends over the
+// background colour exactly like the default display pass.
+// ============================================================
+const surfaceShaderSource = `
+    precision highp float;
+    precision highp sampler2D;
+
+    varying vec2 vUv;
+    varying vec2 vL;
+    varying vec2 vR;
+    varying vec2 vT;
+    varying vec2 vB;
+    uniform sampler2D uTexture;
+    uniform float aspectRatio;
+    uniform float relief;
+    uniform float tint;
+    uniform vec4 surface;   // x: Fresnel F0, y: body gain, z: thin-film amount, w: environment gain
+
+    float thickness (vec3 c) {
+        return max(c.r, max(c.g, c.b));
+    }
+
+    vec3 sky (vec3 r) {
+        return mix(vec3(0.02, 0.022, 0.03), vec3(0.42, 0.47, 0.58), smoothstep(-0.4, 1.0, r.y * 0.6 + r.z * 0.5));
+    }
+
+    vec3 studio (vec3 r) {
+        vec3 c = sky(r);
+        c += vec3(2.8, 2.7, 2.6) * smoothstep(0.26, 0.40, r.y) * (1.0 - smoothstep(0.62, 0.78, r.y)) * (1.0 - smoothstep(0.5, 0.9, abs(r.x)));
+        c += vec3(1.7, 0.95, 0.5) * smoothstep(0.42, 0.60, r.x) * (1.0 - smoothstep(0.8, 0.96, r.x)) * (1.0 - smoothstep(0.1, 0.6, abs(r.y)));
+        c += vec3(0.3, 0.65, 1.5) * (1.0 - smoothstep(-0.68, -0.48, r.x)) * (1.0 - smoothstep(0.0, 0.5, abs(r.y + 0.1)));
+        return c;
+    }
+
+    void main () {
+        vec3 dye = texture2D(uTexture, vUv).rgb;
+        float d = thickness(dye);
+
+        // Sobel gradient over the 8 neighbours: a plain 4-tap difference turns
+        // fine turbulence into crinkled foil instead of a liquid surface.
+        vec2 e = vec2(vR.x - vUv.x, vT.y - vUv.y);
+        float tl = thickness(texture2D(uTexture, vUv + vec2(-e.x, e.y)).rgb);
+        float tc = thickness(texture2D(uTexture, vT).rgb);
+        float tr = thickness(texture2D(uTexture, vUv + e).rgb);
+        float ml = thickness(texture2D(uTexture, vL).rgb);
+        float mr = thickness(texture2D(uTexture, vR).rgb);
+        float bl = thickness(texture2D(uTexture, vUv - e).rgb);
+        float bc = thickness(texture2D(uTexture, vB).rgb);
+        float br = thickness(texture2D(uTexture, vUv + vec2(e.x, -e.y)).rgb);
+        float dx = ((tl + 2.0 * ml + bl) - (tr + 2.0 * mr + br)) * 0.25;
+        float dy = ((bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr)) * 0.25;
+        vec3 n = normalize(vec3(dx * relief, dy * relief, 1.0));
+
+        // Slightly off-axis camera, so flat areas still pick up a gradient across the screen.
+        vec2 p = (vUv - 0.5) * vec2(aspectRatio, 1.0);
+        vec3 v = normalize(vec3(-p * 0.55, 1.0));
+        vec3 r = reflect(-v, n);
+        float ndv = clamp(dot(n, v), 0.0, 1.0);
+        float fresnel = surface.x + (1.0 - surface.x) * pow(1.0 - ndv, 5.0);
+
+        vec3 film = 0.5 + 0.5 * cos(6.2831853 * (d * 1.1 + 0.2 + (1.0 - ndv) * 1.4 + vec3(0.0, 0.33, 0.67)));
+        film = mix(vec3(dot(film, vec3(0.333))), film, 0.85);
+        float light = 0.25 + 1.5 * dot(sky(r), vec3(0.333));
+        vec3 body = mix(vec3(1.0), film, surface.z) * light * surface.y;
+
+        vec3 c = body + studio(r) * fresnel * surface.w;
+        c *= mix(vec3(1.0), dye / max(d, 0.001), tint);
+        c = 1.0 - exp(-c);
+
+        float mask = smoothstep(0.012, 0.07, d);
+        gl_FragColor = vec4(c * mask, mask);
+    }
+`;
+
+const SURFACES = {
+    CHROME: { fresnel: 0.90, body: 0.0, film: 0.0, env: 1.0 },
+    OIL:    { fresnel: 0.06, body: 1.0, film: 1.0, env: 1.6 },
+};
+
+// ============================================================
+// SHADER FILTERS (filterState.name → SHADER_FILTERS)
+// Post-process passes that have to re-sample the finished picture, which the
+// CSS / SVG filters cannot do. render() draws the scene into an off-screen
+// target first, then one of these variants draws it onto the canvas:
+//   FLUTED   — fluted (reeded) glass: periodic cylindrical ribs act as lenses,
+//              R/G/B refract by different amounts, every rib catches a highlight
+//   HALFTONE — print screen: a rotated dot grid whose dot SIZE follows brightness
+//   ASCII    — monospace glyph grid, each cell picks a glyph from a density ramp
+//   DITHER   — 1-bit ordered (Bayer 8×8) dithering in chunky pixels
+// amount = filter intensity (1.0 at the default 50), cell = feature size in px.
+// ============================================================
+const filterShaderSource = `
+    precision highp float;
+    precision highp sampler2D;
+
+    varying vec2 vUv;
+    uniform sampler2D uScene;
+    uniform sampler2D uGlyphs;
+    uniform vec2 resolution;
+    uniform float amount;
+    uniform float cell;
+    uniform float glyphCount;
+
+    const vec3 CREAM = vec3(0.992, 0.988, 0.988);   // --canvas
+    const vec3 INK = vec3(0.125, 0.114, 0.114);     // --ink
+
+    float brightness (vec3 c) {
+        return max(c.r, max(c.g, c.b));
+    }
+
+    #ifdef DITHER
+    float bayer2 (vec2 a) { a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }
+    float bayer4 (vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
+    float bayer8 (vec2 a) { return bayer4(0.5 * a) * 0.25 + bayer2(a); }
+    #endif
+
+    void main () {
+    #ifdef FLUTED
+        float f = fract(vUv.x * resolution.x / cell) - 0.5;         // -0.5 .. 0.5 across one rib
+        float slope = sin(f * 3.14159265);                           // surface slope of a convex rib
+        vec2 bend = vec2(slope * 0.55 * amount * cell / resolution.x, 0.0);
+        vec3 c = vec3(0.0);
+        for (int i = 0; i < 3; i++) {                                // 3 taps per channel: dispersion + a little blur
+            float k = 0.85 + 0.15 * float(i);
+            c.r += texture2D(uScene, vUv + bend * k * 0.82).r;
+            c.g += texture2D(uScene, vUv + bend * k).g;
+            c.b += texture2D(uScene, vUv + bend * k * 1.18).b;
+        }
+        c /= 3.0;
+        float glass = min(amount, 1.2);
+        vec3 n = normalize(vec3(slope * 1.3, 0.0, 1.0));
+        float spec = pow(max(dot(n, normalize(vec3(-0.55, 0.25, 0.8))), 0.0), 60.0);
+        c += 0.9 * glass * spec * (0.25 + 0.75 * brightness(c));     // highlight line on every rib
+        c *= 1.0 - 0.28 * glass * smoothstep(0.36, 0.5, abs(f));     // grooves between ribs
+        gl_FragColor = vec4(c, 1.0);
+    #endif
+
+    #ifdef HALFTONE
+        const float CA = 0.8660254;                                  // 30° screen angle
+        const float SA = 0.5;
+        vec2 frag = vUv * resolution;
+        vec2 g = vec2(CA * frag.x + SA * frag.y, CA * frag.y - SA * frag.x) / cell;
+        vec2 f = fract(g) - 0.5;
+        vec2 centre = (floor(g) + 0.5) * cell;
+        vec3 c = texture2D(uScene, vec2(CA * centre.x - SA * centre.y, SA * centre.x + CA * centre.y) / resolution).rgb;
+        float v = brightness(c);
+        float radius = sqrt(v) * (0.30 + 0.32 * amount);              // dot size follows brightness
+        float edge = 0.9 / cell;
+        float disc = (1.0 - smoothstep(radius - edge, radius + edge, length(f))) * smoothstep(0.0, 0.03, v);
+        vec3 ink = mix(c / max(v, 0.0001), vec3(1.0), 0.12) * (0.75 + 0.35 * v);
+        gl_FragColor = vec4(ink * disc, 1.0);
+    #endif
+
+    #ifdef ASCII
+        vec2 size = vec2(cell * 0.5, cell);                          // monospace cell, 1 : 2
+        vec2 frag = vUv * resolution;
+        vec2 id = floor(frag / size);
+        vec2 cuv = fract(frag / size);
+        vec2 centre = (id + 0.5) * size / resolution;
+        vec2 q = 0.25 * size / resolution;
+        vec3 c = 0.25 * (texture2D(uScene, centre + q).rgb + texture2D(uScene, centre - q).rgb
+                       + texture2D(uScene, centre + vec2(q.x, -q.y)).rgb + texture2D(uScene, centre + vec2(-q.x, q.y)).rgb);
+        float v = brightness(c);
+        float index = floor(pow(clamp(v, 0.0, 0.999), 0.9) * glyphCount);
+        float glyph = texture2D(uGlyphs, vec2((index + cuv.x) / glyphCount, cuv.y)).r;
+        vec3 tinted = c / max(v, 0.0001) * (0.55 + 0.6 * v) + 0.1;
+        gl_FragColor = vec4(mix(CREAM, tinted, clamp(amount * 0.5, 0.0, 1.0)) * glyph, 1.0);
+    #endif
+
+    #ifdef DITHER
+        vec2 id = floor(vUv * resolution / cell);
+        vec3 c = texture2D(uScene, (id + 0.5) * cell / resolution).rgb;
+        float v = brightness(c);
+        float on = step(bayer8(id) + 0.0078125, v);
+        vec3 lit = mix(CREAM, mix(CREAM, c / max(v, 0.0001), 0.85), clamp(amount * 0.5, 0.0, 1.0));
+        gl_FragColor = vec4(mix(INK, lit, on), 1.0);
+    #endif
+    }
+`;
+
+// keyword: variant of filterShaderSource. Feature size in CSS px = size + filterState.scale × step.
+const SHADER_FILTERS = {
+    REEDED:   { keyword: 'FLUTED',   size: 12, step: 0.52 },   // flute width  12..64, 38 at the default scale
+    HALFTONE: { keyword: 'HALFTONE', size: 4,  step: 0.10 },   // dot pitch     4..14,  9
+    ASCII:    { keyword: 'ASCII',    size: 8,  step: 0.24 },   // glyph height  8..32, 20
+    DITHER:   { keyword: 'DITHER',   size: 1,  step: 0.04 },   // pixel size    1..5,   3
+};
+
 const bloomPrefilterShader = compileShader(gl.FRAGMENT_SHADER, `
     precision mediump float;
     precision mediump sampler2D;
@@ -934,6 +1134,14 @@ const pressureProgram        = new Program(baseVertexShader, pressureShader);
 const gradienSubtractProgram = new Program(baseVertexShader, gradientSubtractShader);
 
 const displayMaterial = new Material(baseVertexShader, displayShaderSource);
+const surfaceMaterial = new Material(baseVertexShader, surfaceShaderSource);   // compiled on first use
+const filterMaterial  = new Material(baseVertexShader, filterShaderSource);    // one variant per shader filter
+
+let shaderFilter = null;   // active SHADER_FILTERS entry — kept in sync by applyFilter()
+let sceneTarget = null;    // off-screen copy of the picture, exists only while a shader filter is on
+let glyphAtlas = null;     // ASCII glyph ramp texture, built on first use
+const linkStatus = new Map();       // WebGLProgram → did it link (see useVariant)
+const ASCII_RAMP = ' .:-=+*#%@';    // glyphs of the ASCII filter, darkest to brightest
 
 function initFramebuffers () {
     let simRes = getResolution(config.SIM_RESOLUTION);
@@ -1234,11 +1442,31 @@ function step (dt) {
 }
 
 function render (target) {
-    if (config.BLOOM)
-        applyBloom(dye.read, bloom);
-    if (config.SUNRAYS) {
-        applySunrays(dye.read, dye.write, sunrays);
-        blur(sunrays, sunraysTemp, 1);
+    // A shader filter re-samples the finished picture, so the scene is drawn
+    // off-screen first and the filter pass puts it on the canvas.
+    if (target == null && shaderFilter && useVariant(filterMaterial, [shaderFilter.keyword])) {
+        renderScene(getSceneTarget());
+        drawFilter(shaderFilter);
+        return;
+    }
+    if (target == null)
+        releaseSceneTarget();
+    renderScene(target);
+}
+
+function renderScene (target) {
+    // CHROME / OIL replace the pigment pass; they take no bloom / sunrays input.
+    let surface = SURFACES[config.MATERIAL];
+    if (surface && !useVariant(surfaceMaterial, []))
+        surface = null;
+
+    if (!surface) {
+        if (config.BLOOM)
+            applyBloom(dye.read, bloom);
+        if (config.SUNRAYS) {
+            applySunrays(dye.read, dye.write, sunrays);
+            blur(sunrays, sunraysTemp, 1);
+        }
     }
 
     if (target == null || !config.TRANSPARENT) {
@@ -1253,7 +1481,128 @@ function render (target) {
         drawColor(target, normalizeColor(config.BACK_COLOR));
     if (target == null && config.TRANSPARENT)
         drawCheckerboard(target);
-    drawDisplay(target);
+    if (surface)
+        drawSurface(target, surface);
+    else
+        drawDisplay(target);
+}
+
+// Select (and on first use compile) a Material variant. Returns false if it
+// failed to link on this GPU, so the caller can fall back to the plain picture
+// instead of drawing a black frame.
+function useVariant (material, keywords) {
+    material.setKeywords(keywords);
+    const program = material.activeProgram;
+    if (!linkStatus.has(program))
+        linkStatus.set(program, !!gl.getProgramParameter(program, gl.LINK_STATUS));
+    return linkStatus.get(program);
+}
+
+function getSceneTarget () {
+    const width = gl.drawingBufferWidth;
+    const height = gl.drawingBufferHeight;
+    if (sceneTarget == null || sceneTarget.width != width || sceneTarget.height != height) {
+        releaseSceneTarget();
+        sceneTarget = createFBO(width, height, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR);
+    }
+    return sceneTarget;
+}
+
+function releaseSceneTarget () {
+    if (sceneTarget == null) return;
+    gl.deleteTexture(sceneTarget.texture);
+    gl.deleteFramebuffer(sceneTarget.fbo);
+    sceneTarget = null;
+}
+
+function drawSurface (target, surface) {
+    let width = target == null ? gl.drawingBufferWidth : target.width;
+    let height = target == null ? gl.drawingBufferHeight : target.height;
+
+    // The normal comes from the 8 neighbours of each pixel. They sit ~0.4% of
+    // the short side apart, but never closer than 1.25 dye texels (below that
+    // the bilinear-filtered gradient turns into facets); relief is rescaled so
+    // the look does not change with the dye resolution.
+    const basePx = 0.0039 * Math.min(width, height);
+    const tapPx = Math.max(basePx, 1.25 * width / dye.width);
+
+    surfaceMaterial.bind();
+    const uniforms = surfaceMaterial.uniforms;
+    gl.uniform2f(uniforms.texelSize, tapPx / width, tapPx / height);
+    gl.uniform1f(uniforms.aspectRatio, width / height);
+    gl.uniform1f(uniforms.relief, config.MATERIAL_RELIEF * basePx / tapPx);
+    gl.uniform1f(uniforms.tint, config.MATERIAL_TINT);
+    gl.uniform4f(uniforms.surface, surface.fresnel, surface.body, surface.film, surface.env);
+    gl.uniform1i(uniforms.uTexture, dye.read.attach(0));
+    blit(target);
+}
+
+function drawFilter (filter) {
+    const pixelRatio = window.devicePixelRatio || 1;
+    const cell = Math.max(1, Math.round((filter.size + filterState.scale * filter.step) * pixelRatio));
+
+    gl.disable(gl.BLEND);
+    filterMaterial.bind();
+    const uniforms = filterMaterial.uniforms;
+    gl.uniform2f(uniforms.resolution, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.uniform1f(uniforms.amount, filterState.intensity / 50);
+    gl.uniform1f(uniforms.cell, cell);
+    gl.uniform1i(uniforms.uScene, sceneTarget.attach(0));
+    if (filter.keyword === 'ASCII') {
+        const atlas = getGlyphAtlas();
+        gl.uniform1i(uniforms.uGlyphs, atlas.attach(1));
+        gl.uniform1f(uniforms.glyphCount, atlas.count);
+    }
+    blit(null);
+}
+
+// The ASCII filter's glyph ramp, drawn once into a texture: one 32×64 cell per
+// glyph in a single row, white on black.
+function getGlyphAtlas () {
+    if (glyphAtlas) return glyphAtlas;
+
+    const texture = gl.createTexture();
+    const font = '700 52px ' + getComputedStyle(document.body).fontFamily;
+    const paint = () => {
+        const cellWidth = 32, cellHeight = 64;
+        const sheet = document.createElement('canvas');
+        sheet.width = cellWidth * ASCII_RAMP.length;
+        sheet.height = cellHeight;
+        const ctx = sheet.getContext('2d');
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, sheet.width, sheet.height);
+        ctx.fillStyle = '#fff';
+        ctx.font = font;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        for (let i = 0; i < ASCII_RAMP.length; i++)
+            ctx.fillText(ASCII_RAMP[i], i * cellWidth + cellWidth / 2, cellHeight / 2 + 2);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sheet);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    };
+    paint();
+    // The UI webfont may still be loading — repaint with the real face once it arrives.
+    if (document.fonts && document.fonts.load)
+        document.fonts.load(font).then(paint, () => {});
+
+    glyphAtlas = {
+        texture,
+        count: ASCII_RAMP.length,
+        attach (id) {
+            gl.activeTexture(gl.TEXTURE0 + id);
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            return id;
+        }
+    };
+    return glyphAtlas;
 }
 
 function drawColor (target, color) {
@@ -2079,30 +2428,31 @@ let currentTrajectory = 'RANDOM';
 
 // ============================================================
 // FILTER (post-processing layer over the canvas)
-// Two flavours of effect:
-//   1. CSS filters (FROST/DREAM/GRAIN/VIGNETTE/HALFTONE) — handled by
+// Three flavours of effect:
+//   1. CSS filters (FROST/DREAM/GRAIN/VIGNETTE) — handled by
 //      .filter-overlay div + backdrop-filter / mix-blend-mode.
-//   2. SVG glass-displacement filters (REEDED/RIPPLE/PEBBLED/DIAMOND/MOLTEN)
+//   2. SVG glass-displacement filters (RIPPLE/PEBBLED/DIAMOND/MOLTEN)
 //      — applied to the canvas via `filter: url(#…)`. JS patches each
 //      filter's <feTurbulence> + <feDisplacementMap> + <feGaussianBlur>
 //      attributes live, so the panel can mutate every variable.
+//   3. Shader filters (REEDED/HALFTONE/ASCII/DITHER) — a WebGL pass over
+//      the finished picture, see SHADER_FILTERS / drawFilter().
 // ============================================================
 const filterState = {
     name: 'NONE',
     intensity: 50,
+    scale: 50,          // shader filters: feature size (flute width / dot pitch / glyph / pixel)
     // Per-glass parameters — reloaded from preset whenever the glass mode changes
-    freqX: 0.02,
-    freqY: 0.0005,
-    octaves: 2,
-    seed: 2,
+    freqX: 0.018,
+    freqY: 0.018,
+    octaves: 3,
+    seed: 5,
     blur: 0,
 };
 
 // Each glass preset bundles default values for every variable.
 // baseScale = feDisplacementMap.scale at intensity=50.
 const SVG_FILTERS = {
-    REEDED:  { id: 'reeded-glass',  turbId: 'reeded-turb',  dispId: 'reeded-disp',  blurId: 'reeded-blur',
-               type: 'turbulence',   baseScale: 70,  freqX: 0.020,  freqY: 0.0005, octaves: 2, seed: 2,  blur: 0 },
     RIPPLE:  { id: 'ripple-glass',  turbId: 'ripple-turb',  dispId: 'ripple-disp',  blurId: 'ripple-blur',
                type: 'fractalNoise', baseScale: 25,  freqX: 0.018,  freqY: 0.018,  octaves: 3, seed: 5,  blur: 0 },
     PEBBLED: { id: 'pebbled-glass', turbId: 'pebbled-turb', dispId: 'pebbled-disp', blurId: 'pebbled-blur',
@@ -2129,6 +2479,8 @@ function loadGlassPreset (name) {
 }
 
 function applyFilter () {
+    shaderFilter = SHADER_FILTERS[filterState.name] || null;   // picked up by render()
+
     const el = document.getElementById('filter-overlay');
     if (!el) return;
     el.setAttribute('data-filter', filterState.name);
@@ -2160,6 +2512,15 @@ function applyFilter () {
 
     document.querySelectorAll('.filters button').forEach(b => {
         b.classList.toggle('active', b.dataset.filter === filterState.name);
+    });
+}
+
+// Reflect config.MATERIAL in the material tab bar. The shader side needs no
+// push — renderScene() reads config.MATERIAL every frame.
+function applyMaterial () {
+    const name = SURFACES[config.MATERIAL] ? config.MATERIAL : 'DEFAULT';
+    document.querySelectorAll('.materials button').forEach(b => {
+        b.classList.toggle('active', b.dataset.material === name);
     });
 }
 
@@ -2524,11 +2885,15 @@ const STRINGS = {
         'Grain': '颗粒',
         'Vignette': '暗角',
         'Halftone': '半调',
+        'Dither': '抖动',
         'Reeded': '凹槽',
         'Ripple': '波纹',
         'Pebbled': '鹅卵石',
         'Diamond': '菱形',
         'Molten': '熔融',
+        'Classic': '默认',
+        'Chrome': '液态铬',
+        'Oil': '油膜',
 
         // ── Source picker / overlay ─────────────────────────────
         'Audio-reactive fluid simulation. Enable your microphone to begin.':
@@ -2617,6 +2982,13 @@ const STRINGS = {
         'Sunrays weight': '光线强度',
         'Background': '背景色',
 
+        'Material': '材质',
+        'DEFAULT': '默认',
+        'CHROME': '液态铬',
+        'OIL': '油膜',
+        'Relief': '起伏',
+        'Tint': '染色',
+
         'Mode': '模式',
         'Base hue': '基础色相',
         'Hue range': '色相范围',
@@ -2630,12 +3002,15 @@ const STRINGS = {
         'GRAIN': '颗粒',
         'VIGNETTE': '暗角',
         'HALFTONE': '半调',
+        'ASCII': '字符画',
+        'DITHER': '抖动',
         'REEDED': '凹槽',
         'RIPPLE': '波纹',
         'PEBBLED': '鹅卵石',
         'DIAMOND': '菱形',
         'MOLTEN': '熔融',
         'Filter intensity': '滤镜强度',
+        'Filter scale': '滤镜尺度',
 
         'Frequency X': '频率 X',
         'Frequency Y': '频率 Y',
@@ -2713,6 +3088,13 @@ const STRINGS = {
         'Canvas background color. Tip: pure black (#000000) makes additive colors pop the most.':
             '画面背景色。提示:纯黑 (#000000) 让叠加颜色最鲜明。',
 
+        'How the dye is turned into a picture. DEFAULT = glowing pigment (uses Shading, Bloom and Sunrays). CHROME = liquid metal: density becomes a surface that mirrors a studio environment. OIL = oil slick: iridescent interference colors follow the film thickness. CHROME and OIL ignore Shading, Bloom and Sunrays, and combine with any filter.':
+            '染料如何变成画面。默认 = 发光颜料(使用着色、泛光和光线)。液态铬 = 液态金属:密度变成反射摄影棚环境的表面。油膜 = 浮油:彩虹干涉色随膜厚变化。液态铬和油膜会忽略着色、泛光和光线,并可与任意滤镜叠加。',
+        'CHROME / OIL only. How strongly density differences tilt the surface. 0 = flat mirror, higher = deeper ripples and sharper highlights.':
+            '仅液态铬 / 油膜。密度差异使表面倾斜的程度。0 = 平面镜,越高 = 起伏越深、高光越锐利。',
+        'CHROME / OIL only. How much of the palette color the surface keeps. 0 = pure silver / pure interference colors, 1 = fully tinted by the dye.':
+            '仅液态铬 / 油膜。表面保留多少调色板颜色。0 = 纯银色 / 纯干涉色,1 = 完全染上染料的颜色。',
+
         'How splat colors are picked. FULL = each band uses its anchor hue, splats span the rainbow. SINGLE = every splat picks a hue around Base hue with ±Hue range jitter. MONO = saturation forced to 0, only brightness varies — black/white/grey.':
             '喷溅颜色的选择方式。全彩 = 每个频段使用各自的色相,跨越彩虹。单色 = 每次喷溅围绕基础色相在 ±色相范围内浮动。黑白 = 饱和度强制为 0,只有亮度变化。',
         'SINGLE mode only. 0 = red, 0.17 = yellow, 0.33 = green, 0.5 = cyan, 0.67 = blue, 0.83 = magenta. Loops back to red at 1.':
@@ -2720,15 +3102,17 @@ const STRINGS = {
         'SINGLE mode only. ±jitter around Base hue. 0 = strict single color. 0.3+ = wide spectrum within one family. 0.5 = nearly full rainbow.':
             '仅单色模式。围绕基础色相的 ±抖动范围。0 = 严格单色,0.3+ = 同色系宽频谱,0.5 = 接近全彩虹。',
 
-        'Post-processing over the fluid. CSS layer: FROST/DREAM (blur), GRAIN/HALFTONE (texture overlay), VIGNETTE (dark corners). SVG glass displacement: REEDED (vertical fluted), RIPPLE (water), PEBBLED (small cobbles), DIAMOND (lattice/patterned), MOLTEN (large organic).':
-            '流体之上的后期处理。CSS 层:磨砂/梦境(模糊)、颗粒/半调(纹理叠加)、暗角(边缘变暗)。SVG 玻璃位移:凹槽(垂直凹槽)、波纹(水)、鹅卵石(小石子)、菱形(格子/图案)、熔融(大型有机)。',
-        'Strength of the active filter. FROST/DREAM: blur radius. GRAIN/HALFTONE: opacity. VIGNETTE: darkness. Glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.':
-            '当前滤镜的强度。磨砂/梦境:模糊半径。颗粒/半调:不透明度。暗角:暗度。玻璃类:像素位移幅度(主要的"深度"调节)。滤镜为"无"时不起作用。',
+        'Post-processing over the fluid. CSS layer: FROST/DREAM (blur), GRAIN (film grain), VIGNETTE (dark corners). Shader: HALFTONE (print dots sized by brightness), ASCII (character grid), DITHER (1-bit pixels), REEDED (fluted glass). SVG glass displacement: RIPPLE (water), PEBBLED (small cobbles), DIAMOND (lattice/patterned), MOLTEN (large organic).':
+            '流体之上的后期处理。CSS 层:磨砂/梦境(模糊)、颗粒(胶片颗粒)、暗角(边缘变暗)。着色器:半调(网点大小随亮度变化)、字符画(字符网格)、抖动(1-bit 像素)、凹槽(条纹玻璃)。SVG 玻璃位移:波纹(水)、鹅卵石(小石子)、菱形(格子/图案)、熔融(大型有机)。',
+        'Strength of the active filter. FROST/DREAM: blur radius. GRAIN: opacity. VIGNETTE: darkness. HALFTONE: dot size. ASCII/DITHER: how much image color is kept (0 = two-tone). REEDED: refraction. Other glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.':
+            '当前滤镜的强度。磨砂/梦境:模糊半径。颗粒:不透明度。暗角:暗度。半调:网点大小。字符画/抖动:保留多少画面颜色(0 = 双色)。凹槽:折射强度。其他玻璃类:像素位移幅度(主要的"深度"调节)。滤镜为"无"时不起作用。',
+        'Feature size of the shader filters. HALFTONE: dot pitch. ASCII: character size. DITHER: pixel size. REEDED: flute width. Has no effect on the other filters.':
+            '着色器滤镜的特征尺寸。半调:网点间距。字符画:字符大小。抖动:像素大小。凹槽:条纹宽度。对其他滤镜不起作用。',
 
-        'Horizontal noise frequency for the glass texture. LOW (0.001) = wide bands, HIGH (0.1) = tight stripes. For vertical REEDED look, keep this 5–50× higher than Frequency Y.':
-            '玻璃纹理的水平噪声频率。低 (0.001) = 宽条带,高 (0.1) = 紧密条纹。要做垂直凹槽效果,保持此值比 Y 频率高 5-50 倍。',
-        'Vertical noise frequency. Mirror of Frequency X. For pure vertical reeded glass, drop this near 0; for round pebble patterns, match Frequency X.':
-            '垂直噪声频率。X 频率的镜像。纯垂直凹槽玻璃将此值降到接近 0;圆形鹅卵石图案则与 X 频率匹配。',
+        'Horizontal noise frequency for the glass texture. LOW (0.001) = wide bands, HIGH (0.1) = tight stripes. For vertical streaks, keep this 5–50× higher than Frequency Y.':
+            '玻璃纹理的水平噪声频率。低 (0.001) = 宽条带,高 (0.1) = 紧密条纹。要做垂直条纹效果,保持此值比 Y 频率高 5-50 倍。',
+        'Vertical noise frequency. Mirror of Frequency X. For pure vertical streaks, drop this near 0; for round pebble patterns, match Frequency X.':
+            '垂直噪声频率。X 频率的镜像。纯垂直条纹将此值降到接近 0;圆形鹅卵石图案则与 X 频率匹配。',
         'How many noise octaves are layered. 1 = clean cellular pattern (good for DIAMOND), 3+ = increasingly organic / chaotic (good for RIPPLE).':
             '叠加的噪声层数。1 = 干净的细胞图案(适合菱形),3+ = 越来越有机 / 混乱(适合波纹)。',
         'Noise random seed. Drag to scrub through different texture variations of the same style. The pattern changes shape but keeps the same overall feel.':
@@ -2876,6 +3260,22 @@ const PANEL_SCHEMA = [
         ],
     },
     {
+        title: 'Material',
+        items: [
+            { type: 'select', label: 'Material',
+              options: ['DEFAULT', 'CHROME', 'OIL'],
+              tip: 'How the dye is turned into a picture. DEFAULT = glowing pigment (uses Shading, Bloom and Sunrays). CHROME = liquid metal: density becomes a surface that mirrors a studio environment. OIL = oil slick: iridescent interference colors follow the film thickness. CHROME and OIL ignore Shading, Bloom and Sunrays, and combine with any filter.',
+              get: () => SURFACES[config.MATERIAL] ? config.MATERIAL : 'DEFAULT',
+              set: v => { config.MATERIAL = v; applyMaterial(); } },
+            { type: 'range', label: 'Relief', min: 0, max: 12, step: 0.1,
+              tip: 'CHROME / OIL only. How strongly density differences tilt the surface. 0 = flat mirror, higher = deeper ripples and sharper highlights.',
+              get: () => config.MATERIAL_RELIEF, set: v => config.MATERIAL_RELIEF = +v },
+            { type: 'range', label: 'Tint', min: 0, max: 1, step: 0.01,
+              tip: 'CHROME / OIL only. How much of the palette color the surface keeps. 0 = pure silver / pure interference colors, 1 = fully tinted by the dye.',
+              get: () => config.MATERIAL_TINT, set: v => config.MATERIAL_TINT = +v },
+        ],
+    },
+    {
         title: 'Palette',
         items: [
             { type: 'select', label: 'Mode',
@@ -2894,8 +3294,8 @@ const PANEL_SCHEMA = [
         title: 'Filter',
         items: [
             { type: 'select', label: 'Filter',
-              options: ['NONE', 'FROST', 'DREAM', 'GRAIN', 'VIGNETTE', 'HALFTONE', 'REEDED', 'RIPPLE', 'PEBBLED', 'DIAMOND', 'MOLTEN'],
-              tip: 'Post-processing over the fluid. CSS layer: FROST/DREAM (blur), GRAIN/HALFTONE (texture overlay), VIGNETTE (dark corners). SVG glass displacement: REEDED (vertical fluted), RIPPLE (water), PEBBLED (small cobbles), DIAMOND (lattice/patterned), MOLTEN (large organic).',
+              options: ['NONE', 'FROST', 'DREAM', 'GRAIN', 'VIGNETTE', 'HALFTONE', 'ASCII', 'DITHER', 'REEDED', 'RIPPLE', 'PEBBLED', 'DIAMOND', 'MOLTEN'],
+              tip: 'Post-processing over the fluid. CSS layer: FROST/DREAM (blur), GRAIN (film grain), VIGNETTE (dark corners). Shader: HALFTONE (print dots sized by brightness), ASCII (character grid), DITHER (1-bit pixels), REEDED (fluted glass). SVG glass displacement: RIPPLE (water), PEBBLED (small cobbles), DIAMOND (lattice/patterned), MOLTEN (large organic).',
               get: () => filterState.name,
               set: v => {
                   filterState.name = v;
@@ -2904,18 +3304,21 @@ const PANEL_SCHEMA = [
                   refreshPanel();
               } },
             { type: 'range', label: 'Filter intensity', min: 0, max: 100, step: 1,
-              tip: 'Strength of the active filter. FROST/DREAM: blur radius. GRAIN/HALFTONE: opacity. VIGNETTE: darkness. Glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.',
+              tip: 'Strength of the active filter. FROST/DREAM: blur radius. GRAIN: opacity. VIGNETTE: darkness. HALFTONE: dot size. ASCII/DITHER: how much image color is kept (0 = two-tone). REEDED: refraction. Other glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.',
               get: () => filterState.intensity, set: v => { filterState.intensity = +v; applyFilter(); } },
+            { type: 'range', label: 'Filter scale', min: 0, max: 100, step: 1,
+              tip: 'Feature size of the shader filters. HALFTONE: dot pitch. ASCII: character size. DITHER: pixel size. REEDED: flute width. Has no effect on the other filters.',
+              get: () => filterState.scale, set: v => { filterState.scale = +v; } },
         ],
     },
     {
         title: 'Glass displacement',
         items: [
             { type: 'range', label: 'Frequency X', min: 0.0005, max: 0.2, step: 0.0005,
-              tip: 'Horizontal noise frequency for the glass texture. LOW (0.001) = wide bands, HIGH (0.1) = tight stripes. For vertical REEDED look, keep this 5–50× higher than Frequency Y.',
+              tip: 'Horizontal noise frequency for the glass texture. LOW (0.001) = wide bands, HIGH (0.1) = tight stripes. For vertical streaks, keep this 5–50× higher than Frequency Y.',
               get: () => filterState.freqX, set: v => { filterState.freqX = +v; applyFilter(); } },
             { type: 'range', label: 'Frequency Y', min: 0.0001, max: 0.2, step: 0.0005,
-              tip: 'Vertical noise frequency. Mirror of Frequency X. For pure vertical reeded glass, drop this near 0; for round pebble patterns, match Frequency X.',
+              tip: 'Vertical noise frequency. Mirror of Frequency X. For pure vertical streaks, drop this near 0; for round pebble patterns, match Frequency X.',
               get: () => filterState.freqY, set: v => { filterState.freqY = +v; applyFilter(); } },
             { type: 'range', label: 'Octaves', min: 1, max: 5, step: 1,
               tip: 'How many noise octaves are layered. 1 = clean cellular pattern (good for DIAMOND), 3+ = increasingly organic / chaotic (good for RIPPLE).',
@@ -3281,6 +3684,7 @@ function syncUIFromState () {
         b.classList.toggle('active', b.dataset.mode === currentPresetName);
     });
     applyFilter();   // also re-syncs the .filters tab bar active state
+    applyMaterial(); // same for the .materials tab bar
     refreshPanel();  // re-syncs every panel slider / toggle / select
 }
 
@@ -3783,6 +4187,16 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     });
     applyFilter();
+
+    // Material tab bar — same contract as the filter tabs, state lives in config.MATERIAL
+    document.querySelectorAll('.materials button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            config.MATERIAL = btn.dataset.material;
+            applyMaterial();
+            refreshPanel();
+        });
+    });
+    applyMaterial();
 
     // Auto-start the default microphone on page load — no source-picker
     // overlay. The browser shows its native permission prompt the first

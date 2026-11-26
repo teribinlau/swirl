@@ -15,8 +15,11 @@ music and the fluid responds in colour, intensity and rhythm.
   Kaleido (6-fold mandala) · Comet (meteor streaks) · Pulse (beat rings)
 - **10 trajectories**: Random · Lissajous · Orbit · Sine wave · Aqua · Blink ·
   Vortex · Kaleido · Comet · Pulse
-- **11 post-processing filters**, including SVG displacement glass effects
-  (Reeded, Ripple, Pebbled, Diamond, Molten)
+- **12 post-processing filters**: CSS (Frost, Dream, Grain, Vignette), SVG
+  displacement glass (Ripple, Pebbled, Diamond, Molten) and WebGL shader
+  filters (fluted Reeded glass, true Halftone, ASCII, 1-bit Dither)
+- **3 materials** — Classic (glowing pigment), Chrome (liquid metal), Oil
+  (thin-film iridescence); any material stacks with any filter
 - **3-mode palette system**: Full rainbow / Single hue family / Mono greyscale
 - **Live settings panel** — every parameter is tunable, with tooltips
 - **Persistent settings** — Save as default to localStorage; Copy as JSON
