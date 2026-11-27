@@ -1,9 +1,13 @@
 // Cloudflare Workers static-assets config — SWIRL is a pure static site,
-// so there is no Worker script: just serve the repo root as assets.
+// so there is no Worker script: just serve `public/` as assets.
+//
+// Keep the site in its own directory: wrangler uploads everything under
+// `assets.directory` and does not skip `.git/`, so pointing it at the repo
+// root publishes the repository's history along with the site.
 {
     "name": "swirl",
     "compatibility_date": "2026-06-11",
     "assets": {
-        "directory": "."
+        "directory": "./public"
     }
 }
