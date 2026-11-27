@@ -61,6 +61,8 @@ Then open `http://localhost:8765` and grant microphone access on first visit.
   - `LDR_LLL1_0.png` — blue-noise texture that dithers the bloom pass
 - `wrangler.jsonc` — Cloudflare Workers config; serves `public/` as static assets
 - `DESIGN.md` — Reference design system spec (opencode.ai)
+- `film/` — source of the demo video: renders the real app frame by frame
+  (see `film/README.md`); not deployed
 
 ## Licence
 
