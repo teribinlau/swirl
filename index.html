@@ -109,13 +109,25 @@
             letter-spacing: 0;
         }
 
+        /* Mode tab bar. Right-aligned while it fits; on narrow windows it
+           scrolls sideways instead of running under the title. The alignment
+           comes from an auto margin on the first tab, NOT justify-content:
+           flex-end — with flex-end the overflow lands on the start side, where
+           a scroll container cannot reach it, so the first tabs become
+           unselectable (that was the case on phones). */
         .modes {
             position: absolute;
             top: var(--xl);
+            left: 96px;
             right: 28px;
             display: flex;
             gap: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: none;
         }
+        .modes::-webkit-scrollbar { display: none; }
+        .modes button:first-child { margin-left: auto; }
         .modes button {
             background: none;
             border: none;
@@ -126,6 +138,7 @@
             letter-spacing: 0;
             cursor: pointer;
             padding: 8px 16px;
+            flex-shrink: 0;
             transition: color 0.15s ease, border-color 0.15s ease;
         }
         .modes button:hover { color: var(--on-dark); }
@@ -134,15 +147,34 @@
             border-bottom-color: var(--ash);
         }
 
-        /* Filter tab bar — second row under .modes */
+        /* Filter tab bar — second row under .modes. Right-aligned while it
+           fits; on narrow windows it scrolls sideways instead of running into
+           the settings toggle (the auto margin collapses once it overflows). */
         .filters {
             position: absolute;
             top: 56px;
+            left: 150px;
+            right: 28px;
+            display: flex;
+            gap: 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: none;
+        }
+        .filters::-webkit-scrollbar { display: none; }
+        .filters button:first-child { margin-left: auto; }
+
+        /* Material tab bar — third row: how the dye is shaded (config.MATERIAL) */
+        .materials {
+            position: absolute;
+            top: 84px;
             right: 28px;
             display: flex;
             gap: 0;
         }
-        .filters button {
+
+        .filters button,
+        .materials button {
             background: none;
             border: none;
             border-bottom: 2px solid transparent;
@@ -152,13 +184,22 @@
             letter-spacing: 0;
             cursor: pointer;
             padding: 6px 10px;
+            flex-shrink: 0;
             transition: color 0.15s ease, border-color 0.15s ease;
         }
-        .filters button:hover { color: var(--on-dark); }
-        .filters button.active {
+        .filters button:hover,
+        .materials button:hover { color: var(--on-dark); }
+        .filters button.active,
+        .materials button.active {
             color: var(--on-dark);
             border-bottom-color: var(--ash);
         }
+
+        /* The scrolling tab rows clip their overflow, which would cut the top
+           and bottom off the keyboard focus ring — draw it inside the tab. */
+        .modes button:focus-visible,
+        .filters button:focus-visible,
+        .materials button:focus-visible { outline-offset: -2px; }
 
         /* ============================================================
            FILTER OVERLAY — post-processing layer over the fluid canvas
@@ -288,22 +329,6 @@
             -webkit-backdrop-filter: brightness(1.05) saturate(1.12);
         }
 
-        /* Halftone — print dots that actually bite: dot size grows with
-           strength inside a fixed grid (instead of a tiny fixed dot), and
-           a backdrop contrast boost gives the inky print look. */
-        .filter-overlay[data-filter="HALFTONE"] {
-            background-image: radial-gradient(
-                circle at center,
-                rgba(0, 0, 0, 0.95) calc(0.8px + var(--filter-strength) * 0.016px),
-                transparent calc(1.3px + var(--filter-strength) * 0.016px)
-            );
-            background-size: 7px 7px;
-            mix-blend-mode: multiply;
-            opacity: calc(0.3 + var(--filter-strength) * 0.007);
-            backdrop-filter: contrast(calc(1 + var(--filter-strength) * 0.005)) brightness(1.06);
-            -webkit-backdrop-filter: contrast(calc(1 + var(--filter-strength) * 0.005)) brightness(1.06);
-        }
-
         .footer-left, .footer-center, .mic-status {
             position: absolute;
             bottom: var(--xl);
@@ -385,6 +410,7 @@
         body.presenting .title,
         body.presenting .modes,
         body.presenting .filters,
+        body.presenting .materials,
         body.presenting .panel-toggle,
         body.presenting .footer-left,
         body.presenting .footer-center,
@@ -1015,8 +1041,9 @@
            ============================================================ */
         @supports (padding: max(0px)) {
             .title          { top:  max(var(--xl), env(safe-area-inset-top)); left: max(28px, env(safe-area-inset-left)); }
-            .modes          { top:  max(var(--xl), env(safe-area-inset-top)); right: max(28px, env(safe-area-inset-right)); }
-            .filters        { right: max(28px, env(safe-area-inset-right)); }
+            .modes          { top:  max(var(--xl), env(safe-area-inset-top)); right: max(28px, env(safe-area-inset-right)); left: max(96px, calc(env(safe-area-inset-left) + 68px)); }
+            .filters        { right: max(28px, env(safe-area-inset-right)); left: max(150px, calc(env(safe-area-inset-left) + 122px)); }
+            .materials      { right: max(28px, env(safe-area-inset-right)); }
             .panel-toggle   { left: max(28px, env(safe-area-inset-left)); }
             .footer-left    { left: max(28px, env(safe-area-inset-left));   bottom: max(var(--xl), env(safe-area-inset-bottom)); }
             .footer-center  { bottom: max(var(--xl), env(safe-area-inset-bottom)); }
@@ -1049,7 +1076,6 @@
                 top: 10px;
                 left: 76px;            /* clears the "SWIRL" title */
                 right: 12px;
-                justify-content: flex-end;
             }
             .modes button {
                 padding: 6px 8px;
@@ -1067,6 +1093,13 @@
                 padding: 6px 8px;
                 font-size: 11px;
                 flex-shrink: 0;
+            }
+            .filters button:first-child { margin-left: 0; }
+
+            .materials { top: 66px; right: 12px; }
+            .materials button {
+                padding: 6px 8px;
+                font-size: 11px;
             }
 
             .panel-toggle { top: 72px; left: 14px; }
@@ -1134,11 +1167,6 @@
          id so JS can patch its attributes live from the panel knobs. -->
     <svg width="0" height="0" style="position:absolute;pointer-events:none" aria-hidden="true">
         <defs>
-            <filter id="reeded-glass" x="-5%" y="-5%" width="110%" height="110%">
-                <feTurbulence id="reeded-turb" type="turbulence" baseFrequency="0.02 0.0005" numOctaves="2" seed="2" result="noise"/>
-                <feDisplacementMap id="reeded-disp" in="SourceGraphic" in2="noise" scale="70" xChannelSelector="R" yChannelSelector="G" result="disp"/>
-                <feGaussianBlur id="reeded-blur" in="disp" stdDeviation="0"/>
-            </filter>
             <filter id="ripple-glass" x="-5%" y="-5%" width="110%" height="110%">
                 <feTurbulence id="ripple-turb" type="fractalNoise" baseFrequency="0.018 0.018" numOctaves="3" seed="5" result="noise"/>
                 <feDisplacementMap id="ripple-disp" in="SourceGraphic" in2="noise" scale="25" xChannelSelector="R" yChannelSelector="G" result="disp"/>
@@ -1185,11 +1213,19 @@
             <button data-filter="GRAIN" data-i18n="Grain">Grain</button>
             <button data-filter="VIGNETTE" data-i18n="Vignette">Vignette</button>
             <button data-filter="HALFTONE" data-i18n="Halftone">Halftone</button>
+            <button data-filter="ASCII" data-i18n="ASCII">ASCII</button>
+            <button data-filter="DITHER" data-i18n="Dither">Dither</button>
             <button data-filter="REEDED" data-i18n="Reeded">Reeded</button>
             <button data-filter="RIPPLE" data-i18n="Ripple">Ripple</button>
             <button data-filter="PEBBLED" data-i18n="Pebbled">Pebbled</button>
             <button data-filter="DIAMOND" data-i18n="Diamond">Diamond</button>
             <button data-filter="MOLTEN" data-i18n="Molten">Molten</button>
+        </div>
+
+        <div class="materials">
+            <button data-material="DEFAULT" class="active" data-i18n="Classic">Classic</button>
+            <button data-material="CHROME" data-i18n="Chrome">Chrome</button>
+            <button data-material="OIL" data-i18n="Oil">Oil</button>
         </div>
 
         <div class="footer-left">52&deg;30'N 13&deg;24'E</div>
@@ -1254,6 +1290,6 @@
     <input type="file" id="settings-import-input" accept="application/json,.json" hidden>
 
     <!-- ?v= busts stale caches (iOS Safari + CDN edge) — bump on script changes -->
-    <script src="./script.js?v=10"></script>
+    <script src="./script.js?v=11"></script>
 </body>
 </html>
