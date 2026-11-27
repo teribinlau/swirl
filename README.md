@@ -28,15 +28,18 @@ music and the fluid responds in colour, intensity and rhythm.
 
 ## Running locally
 
-`getUserMedia` (microphone) requires a secure context, so `file://` doesn't
-work — you need a local server:
+The site lives in `public/`. `getUserMedia` (microphone) requires a secure
+context, so `file://` doesn't work — you need a local server, started from
+inside that directory:
 
 ```bash
+cd public
+
 # Python
 python -m http.server 8765
 
 # Node
-npx serve .
+npx serve -l 8765
 ```
 
 Then open `http://localhost:8765` and grant microphone access on first visit.
@@ -51,8 +54,12 @@ Then open `http://localhost:8765` and grant microphone access on first visit.
 
 ## Files
 
-- `index.html` — UI, styling (opencode design tokens), SVG displacement filter defs
-- `script.js` — Fluid engine + audio analyser + panel + filter pipeline
+- `public/` — the site. Only this directory is deployed, and everything in it
+  is served publicly
+  - `index.html` — UI, styling (opencode design tokens), SVG displacement filter defs
+  - `script.js` — Fluid engine + audio analyser + panel + filter pipeline
+  - `LDR_LLL1_0.png` — blue-noise texture that dithers the bloom pass
+- `wrangler.jsonc` — Cloudflare Workers config; serves `public/` as static assets
 - `DESIGN.md` — Reference design system spec (opencode.ai)
 
 ## Licence
