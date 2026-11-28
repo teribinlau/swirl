@@ -936,7 +936,7 @@ const stampSource = `
             vec4 e = extra[i];
             float v = tint[i].a;
             float b0 = length(p) - s.z;
-            if (b0 > s.w || b0 < -3.0 * e.x - s.w) continue;
+            if (b0 > s.w + max(0.0, -3.0 * e.x) || b0 < -3.0 * max(0.0, e.x) - s.w) continue;     // a ring that shrinks trails outside
             float b1 = b0 + e.x, b2 = b1 + e.x, b3 = b2 + e.x;
             sum += tint[i].rgb * (exp(-b0 * b0 / v) + e.y * exp(-b1 * b1 / v) + e.z * exp(-b2 * b2 / v) + e.w * exp(-b3 * b3 / v));
         #else
@@ -3015,7 +3015,7 @@ function audioBurst (amount, audio, gain) {
 //            kick / bass note        snare / a mid note            hats
 //   SMOKE    the centre cannon       the outer pair, a gust back   two small vents tick
 //   INK      a downstroke / short    a slash / a dot               specks
-//   RAINBOW  two jets collide        a collision across / a jet    sparks from the burst
+//   RAINBOW  a bow rises             a beam through a prism / bead glints
 //   AQUA     the jellyfish pulse     they flash and turn / one     plankton sparkles
 //   BLINK    a drop at one focus     a drop at the other / small   droplets
 //   VORTEX   a new arm, a heartbeat  the core flares, a whip / a   stars
@@ -3136,8 +3136,9 @@ function runSweeps (c) {
 // A ripple that really travels: each frame it is drawn at its new radius and what it drew the
 // frame before is taken back (as negative dye, less what the water lost in between), all but a
 // share `wake` that is left to glow and fade behind it. It leaves fast and slows as it spreads,
-// fading as it goes. reach: how far it gets, in screen heights; glow: how bright it may get, in
-// shares of the panel's colour gain; delay: seconds before it sets off.
+// fading as it goes. reach: how far it gets, in screen heights (negative: it shrinks); glow: how
+// bright it may get, in shares of the panel's colour gain; delay: seconds before it sets off.
+// A ripple object with a `base` starts from that radius instead of 0.02 (the rainbow's bands).
 function ripple (list, x, y, amp, reach, life, thick, glow, wake, hue, delay = 0) {
     const p = { x, y, amp, reach, life, thick, glow, wake, hue, age: -delay, last: 0, rad: 0 };
     list.push(p);
@@ -3153,7 +3154,7 @@ function runRipples (c, list) {
         if (p.age <= 0) continue;                                       // not off yet
         const u = p.age / p.life;
         if (u >= 1) { list.splice(i, 1); continue; }
-        const rad = 0.02 + p.reach * (1 - Math.pow(1 - u, 2.2));
+        const rad = (p.base == null ? 0.02 : p.base) + p.reach * (1 - Math.pow(1 - u, 2.2));
         const v = softColor(p.amp * Math.pow(1 - u, 2.2) * 1.3, c.gain * p.glow, AUDIO.COLOR_KNEE);
         if (v > 0.0005) ringDye(p.x, p.y, rad, rigColor(v, p.hue), c.r * p.thick, rad - p.rad, [p.last > 0 ? -(p.last / v) * (1 - p.wake) * kept : 0, 0, 0]);
         p.last = v > 0.0005 ? v : 0; p.rad = rad;
@@ -3329,65 +3330,71 @@ const RIGS = {
     },
 
     // ---------------------------------------------------------------- RAINBOW
-    // Colour against colour. Every kick fires two jets at each other from opposite sides, in
-    // colours opposite on the colour wheel, and they burst sideways where they meet. The line
-    // they fly along turns an eighth of a turn with each kick — four kicks, and it has come
-    // half way round to where it started — and their colours step round the wheel with it. A
-    // snare is a smaller collision across the first; a note a single jet; hats throw sparks out
-    // of the burst. Between the hits the colour keeps swirling, and the sustained sound
-    // breathes more into it.
+    // Light and a prism. Every kick raises a rainbow: seven bands, red outside and violet inside,
+    // that rise from below the floor as one wave and leave a glow of colour that the air carries
+    // off. The bow rises on the left on one beat and on the right on the next. A snare is a beam
+    // of white light that crosses into the picture and splits into a fan of colours where it
+    // meets the prism; a note is a bead of the next colour of the spectrum, a hat a glint. With
+    // nothing striking, colour rises from the floor in the order of the spectrum.
     RAINBOW: {
-        init: () => ({ k: 0, n: 0, hue: Math.random(), kick: null, a0: 1, own: 0 }),
+        init: () => ({ bows: [], side: 0, beam: 0, k: 0, hue: 0 }),
         frame (c) {
-            const { R, S, F, r } = c;
-            // where they meet: drifting slowly round the middle of the screen
-            const px = 0.5 + 0.135 * Math.sin(c.t * 0.29), py = 0.5 + 0.13 * Math.sin(c.t * 0.37 + 1);
-            const roomX = (0.46 - Math.abs(px - 0.5)) * c.aspect, roomY = 0.45 - Math.abs(py - 0.5);
-            // two jets meeting head on along `angle`, from `reach` screen heights out (or as far as the screen allows)
-            const clash = (angle, reach, a, hue, width) => {
-                const ux = Math.cos(angle), uy = Math.sin(angle);
-                const d = Math.min(reach, roomX / Math.max(0.01, Math.abs(ux)), roomY / Math.max(0.01, Math.abs(uy)));
-                return [1, -1].map(s => {
-                    const x0 = px + s * ux * d / c.aspect, y0 = py + s * uy * d;
-                    return sweep(c, u => [x0 + (px - x0) * u, y0 + (py - y0) * u], c.dye(a, 0.7, hue + (s > 0 ? 0 : 0.5)), r * width, F * 1.9 * a, 0.07);
-                });
+            const { R, S, F, r } = c, BANDS = 7;
+            const hueOf = i => 0.8 * i / (BANDS - 1);                    // red .. violet
+            const bow = (x, amp, reach, life, wake, delay = 0, flip = false) => {
+                const out = [];
+                for (let i = 0; i < BANDS; i++) {
+                    const p = { x, y: -0.18, base: 0.5 - 0.036 * i, amp, reach, life, thick: 0.06, glow: 2.0, wake, hue: hueOf(flip ? BANDS - 1 - i : i), age: -delay, last: 0, rad: 0 };
+                    S.bows.push(p); out.push(p);
+                }
+                while (S.bows.length > 4 * BANDS) S.bows.shift();
+                return out;
             };
-            // bed: each range breathes its own colour into the swirl, from a place of its own
-            for (const [i, lv] of [[0, R.low.level], [1, R.low.level], [2, R.mid.level], [3, R.mid.level], [4, R.high.level], [5, R.high.level]]) {
-                const L = c.level(lv) * c.duck;
-                if (L < 0.05) continue;
-                const b = BAND_ANCHORS[i], th = c.t * 0.4 + i * 1.05;
-                dotDye(b.baseX, b.baseY, c.dye(L * 0.6, 0.08 * c.step, b.hue), r * 0.6);
-                splatPush(b.baseX, b.baseY, Math.cos(th) * F * 0.03 * L * c.step, Math.sin(th) * F * 0.03 * L * c.step, r * 0.8);
+            // bed: the spectrum rises from the floor for as long as the music sustains
+            const L = c.level(Math.max(R.mid.level, R.low.level * 0.8)) * c.duck;
+            if (L > 0.03) {
+                for (let i = 0; i < BANDS; i++) {
+                    const x = 0.08 + 0.84 * i / (BANDS - 1) + Math.sin(c.t * 0.9 + i * 1.3) * 0.02;
+                    splatPush(x, 0.02, 0, F * 0.04 * (0.5 + L) * c.step, r * 0.8);
+                    dotDye(x, 0.02, c.dye(L * 0.6, 0.03 * c.step, hueOf(i)), r * 0.5);
+                }
             }
-            const own = c.own(1.6);
-            if (R.low.struck || own) {
-                S.k++; S.hue += 0.125;
-                const a = R.low.struck ? c.hit(R.low.strength) : own, s = R.low.struck ? Math.min(1.3, R.low.strength) : 0.5;
-                const jets = clash(S.k * Math.PI / 4, 0.42 + 0.2 * s, a, S.hue, 0.45 + 0.2 * s);
-                if (R.low.struck) { S.kick = jets; S.a0 = a; }
-            } else if (R.low.hit > 0 && S.kick) for (const j of S.kick) j.amp = c.hit(R.low.strength) / S.a0;
+            const low = c.arrive(R.low);
+            if (R.low.struck) { S.side = 1 - S.side; S.kick = bow(S.side ? 0.6 : 0.4, 0, 0.3, 0.8, 0.08); }
+            if (low > 0 && S.kick) {
+                const s = Math.min(1.3, R.low.strength), beat = R.kickJitter < 0.15 ? R.kickEvery : 0.55;
+                for (const p of S.kick) { p.amp += low * 0.75; p.reach = 0.12 + 0.3 * s; p.life = Math.min(1.2, Math.max(0.55, 1.4 * beat)); }
+                // the bow lifts the air with it, and the colour it leaves billows
+                for (let i = 0; i < 5; i++) {
+                    const a = Math.PI * (0.25 + 0.125 * i), x = S.kick[0].x + Math.cos(a) * 0.62 / c.aspect, y = -0.18 + Math.sin(a) * 0.62;
+                    if (y > 0) splatPush(x, y, Math.cos(a) * F * 0.2 * low, Math.sin(a) * F * 0.2 * low, r * 2.5);
+                }
+            }
             if (R.drop) {
-                // the drop: both lines at once, full size
-                clash(S.k * Math.PI / 4, 0.5, 1.3 * c.punch, S.hue, 0.8);
-                clash(S.k * Math.PI / 4 + Math.PI / 2, 0.5, 1.3 * c.punch, S.hue + 0.25, 0.8);
+                // the drop: a double rainbow, the second one wider and with its colours the other way round
+                bow(0.5, 1.4 * c.punch, 0.45, 1.4, 0.3);
+                bow(0.5, 0.8 * c.punch, 0.62, 1.6, 0.3, 0.1, true);
             }
-            if (R.snare > 0) {
-                const h = c.hit(R.snare), s = Math.min(1.3, R.snare);
-                clash(S.k * Math.PI / 4 + Math.PI / 2, 0.18 + 0.1 * s, h * 0.9, S.hue + 0.25, 0.35);
-            } else if (R.mid.struck) {
-                const h = 0.6 * c.hit(R.mid.strength), th = S.n++ * 2.39996;            // the golden angle: never the same side twice
-                const x0 = px + Math.cos(th) * 0.28 / c.aspect, y0 = py + Math.sin(th) * 0.28;
-                sweep(c, u => [x0 + (px - x0) * 0.7 * u, y0 + (py - y0) * 0.7 * u], c.dye(h, 0.6, S.hue + Math.random()), r * 0.3, F * 1.0 * h, 0.08);
+            const beam = (h, left) => {
+                const y0 = 0.45 + 0.3 * ((S.beam * 0.618034) % 1), px = left ? 0.4 : 0.6, py = y0 - 0.04;
+                stroke(c, left ? -0.02 : 1.02, y0, px, py, c.dye(h * 0.8, 0.25, 0), r * 0.25, F * 0.3 * h, 0.06);
+                for (let i = 0; i < BANDS; i++) {
+                    const a = -0.32 + 0.09 * i, d = left ? 1 : -1;
+                    stroke(c, px, py, px + d * Math.cos(a) * 0.7 / c.aspect, py + Math.sin(a) * 0.7, c.dye(h, 0.22, hueOf(i)), r * 0.3, F * 0.25 * h, 0.12);
+                }
+                dotDye(px, py, c.dye(h * 1.2, 1.2, 0.15), r * 0.6);
+            };
+            if (R.snare > 0) beam(c.hit(R.snare), (S.beam++ % 2) === 0);
+            if (R.drop) { beam(1.2 * c.punch, true); beam(1.2 * c.punch, false); }
+            const mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (R.mid.struck) { const [hx, hy] = halton(S.k++); S.note = [0.08 + 0.84 * hx, 0.3 + 0.6 * hy]; S.hue = (S.hue + 1) % BANDS; }
+            if (mid > 0 && S.note) {
+                dotDye(S.note[0], S.note[1], c.dye(mid * 1.1, 1.4, hueOf(S.hue)), r * 0.35);
+                splatPush(S.note[0], S.note[1], 0, F * 0.3 * mid, r * 0.6);
             }
-            const high = c.arrive(R.high);
-            if (high > 0) {
-                // sparks flying out of the burst, across the line of the jets
-                const th = S.k * Math.PI / 4 + Math.PI / 2 + (Math.random() - 0.5) * 0.6, side = Math.random() < 0.5 ? 1 : -1, d = 0.06 + 0.12 * Math.random();
-                const x = px + side * Math.cos(th) * d / c.aspect, y = py + side * Math.sin(th) * d;
-                dotDye(x, y, c.dye(high, 2.0, S.hue + Math.random()), r * 0.14);
-                splatPush(x, y, side * Math.cos(th) * F * 0.3 * high, side * Math.sin(th) * F * 0.3 * high, r * 0.3);
-            }
+            if (high > 0) dotDye(Math.random(), 0.2 + 0.75 * Math.random(), c.dye(high, 2.2, Math.random() * 0.8), r * 0.14);
+            runRipples(c, S.bows);
+            rigCurl = 4 * R.high.env;
         },
     },
 
@@ -3806,10 +3813,10 @@ const PRESETS = {
         SHADING: true,
     },
     RAINBOW: {
-        _trajectory: 'RAINBOW',        // jets of colour that collide on the kick
+        _trajectory: 'RAINBOW',        // a rainbow raised by every kick, a prism lit by the snare
         _palette: { mode: 'FULL' },    // the full-spectrum showcase
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.5,     // the bursts swirl on for a beat or two, then settle
+        DENSITY_DISSIPATION: 2.8,      // the colour a bow leaves hangs in the air for a beat
+        VELOCITY_DISSIPATION: 0.8,
         PRESSURE: 0.8,
         CURL: 1,
         SPLAT_RADIUS: 0.3,
@@ -4226,8 +4233,8 @@ const STRINGS = {
         'Extra Gaussian blur layered on top of the displaced canvas. 0 = sharp glass, 2+ = thick frosted look. Mostly used by MOLTEN; great companion to all glass modes.':
             '叠加在位移后画面之上的额外高斯模糊。0 = 锐利玻璃,2+ = 厚磨砂感。主要用于熔融效果,也适合所有玻璃模式。',
 
-        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = jets of colour that collide on the kick. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = a loudspeaker: band rings, and a wave on every kick.':
-            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。烟雾 = 鼓点点燃的烟柱。墨色 = 踩着节拍写下的笔触。彩虹 = 随底鼓对撞的彩色射流。水母 = 随底鼓游动的水母。涟漪 = 落在节拍上的雨滴。漩涡 = 每个底鼓卷入一条新旋臂的星系。万花筒 = 随节拍一圈圈画出的曼陀罗。流星 = 流星雨,每个底鼓一颗流星。脉冲 = 扬声器:频段光环,每个底鼓一道冲击波。',
+        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = a loudspeaker: band rings, and a wave on every kick.':
+            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。烟雾 = 鼓点点燃的烟柱。墨色 = 踩着节拍写下的笔触。彩虹 = 每个底鼓升起一道彩虹,军鼓点亮一束棱镜光。水母 = 随底鼓游动的水母。涟漪 = 落在节拍上的雨滴。漩涡 = 每个底鼓卷入一条新旋臂的星系。万花筒 = 随节拍一圈圈画出的曼陀罗。流星 = 流星雨,每个底鼓一颗流星。脉冲 = 扬声器:频段光环,每个底鼓一道冲击波。',
         'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).':
             '低于此阈值的频段会被忽略。调高以过滤背景噪声(房间嗡嗡声、微弱的麦克风拾音)。',
         'How hard each frame pushes the fluid. Higher = more violent motion. The main "intensity" knob.':
@@ -4442,7 +4449,7 @@ const PANEL_SCHEMA = [
         items: [
             { type: 'select', label: 'Trajectory',
               options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'SMOKE', 'INK', 'RAINBOW', 'AQUA', 'BLINK', 'VORTEX', 'KALEIDO', 'COMET', 'PULSE'],
-              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = jets of colour that collide on the kick. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = a loudspeaker: band rings, and a wave on every kick.',
+              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = a loudspeaker: band rings, and a wave on every kick.',
               get: () => currentTrajectory, set: v => currentTrajectory = v },
             { type: 'range', label: 'Band threshold', min: 0,    max: 0.3,  step: 0.005,
               tip: 'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).',

@@ -14,7 +14,7 @@ music and the fluid responds in colour, intensity and rhythm.
   nine modes are choreographed from those events
 - **9 mode presets** — each a complete scene (physics + trajectory + palette):
   Smoke (fog cannons fired by the drums) · Ink (brush strokes written on the
-  beat) · Rainbow (jets of colour that collide on the kick) · Aqua (jellyfish
+  beat) · Rainbow (a rainbow on the kick, a prism on the snare) · Aqua (jellyfish
   that swim on the kick) · Blink (raindrops landing on the beat) · Vortex (a
   whirlpool that winds in a new arm on every kick) · Kaleido (a mandala drawn
   ring by ring) · Comet (a meteor shower) · Pulse (a loudspeaker: band rings
