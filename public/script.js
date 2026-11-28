@@ -1874,7 +1874,7 @@ function ringDye (x, y, ringRadius, color, thickness, gap, lobes) {
     const variance = correctRadius(thickness / 100.0);
     stamp(STAMP_RING, x, y, ringRadius, 3.5 * Math.sqrt(variance), color, variance, gap, lobes[0], lobes[1], lobes[2]);
 }
-const RING_PLAIN = [0, 0, 0], RING_RIPPLE = [-0.92, 0, 0];
+const RING_RIPPLE = [-0.92, 0, 0];
 
 // A jellyfish. radius: of the bell, in screen heights. squeeze: 0 relaxed .. 1 contracted.
 // (upX, upY): the unit vector it points along. sway: how far its tentacles hang to one side.
@@ -3022,7 +3022,7 @@ function audioBurst (amount, audio, gain) {
 //            at the core             knot of light
 //   KALEIDO  a ring of petals        petals folded in / beads      glitter at the rim
 //   COMET    a bright meteor         one that bursts / a faint one sparks
-//   PULSE    the cone punches        a double wave / middle rings  a tick on the rim
+//   PULSE    a ring out              a ring in / a short ring      a quick ripple
 //
 // and each keeps a quiet bed going from the sustained levels, so music without
 // drums still moves; the bed ducks under every kick, the way a mix does. With no
@@ -3178,7 +3178,6 @@ function runRig (audio) {
         level: x => Math.pow(Math.max(0, (x - gate) / (1 - gate)), AUDIO.ENERGY_CURVE),
         // the bed makes room for the kick and swells back after it
         duck: 1 - 0.85 * Math.min(1, R.low.env),
-        bands: audio.smoothedBands,
     };
     // how much of the scene shows: nothing in silence, all of it once the music is up
     c.seen = Math.min(1, c.level(loud) * 1.6);
@@ -3713,61 +3712,52 @@ const RIGS = {
     },
 
     // ---------------------------------------------------------------- PULSE
-    // A loudspeaker seen from the front. Six rings stand round the centre, one for each band of
-    // the spectrum from the bass in the middle to the air at the rim, each as bright as its band
-    // is loud, measured against its own recent range so that all of them move. A kick punches
-    // the cone: the centre flashes and a wave leaves it and runs out through the rings. A snare
-    // sends a quicker double wave and lights every ring; notes light the middle rings, hats
-    // tick on the outer one, and the drop sends three waves at once.
+    // A speaker cone seen from the front. The kick pushes it out: a flash at the centre and a
+    // thick ring that leaves at speed, followed by a smaller one, so the rings stand out in time
+    // with the kicks. A snare is the room answering: a ring that comes in from the edge and
+    // closes on the centre. Notes send a thin ring part of the way out, hats a quick ripple.
+    // With no beat the centre breathes with the music.
     PULSE: {
-        init: () => ({ ripples: [], lo: [1, 1, 1, 1, 1, 1], hi: [0, 0, 0, 0, 0, 0], last: [0, 0, 0, 0, 0, 0], rad: [0, 0, 0, 0, 0, 0], kick: null, hue: Math.random(), tick: 0, own: 0 }),
+        init: () => ({ rings: [], k: 0 }),
         frame (c) {
-            const { R, S, r } = c, k = Math.min(1, c.aspect);
-            // the cone moves out with the kick and springs back, and the rings with it
-            const radius = i => (0.075 + 0.068 * i) * k * (1 + 0.2 * Math.min(1, R.low.env));
-            const flare = [0, 0, 0, 0, 0, 0];
-            const low = c.arrive(R.low), mid = c.arrive(R.mid), high = c.arrive(R.high), own = c.own(1.4);
-            const wave = R.kickJitter < 0.15 ? Math.min(0.9, Math.max(0.45, R.kickEvery)) : 0.6;     // a wave lasts about a beat
-            if (R.low.struck || own) {
-                S.hue = Math.random();
-                S.kick = ripple(S.ripples, 0.5, 0.5, own, 0.6 * k, wave, 0.12, 3.2, 0.12, S.hue);
-                if (own) dotDye(0.5, 0.5, c.dye(own, 2.4, S.hue), r * 0.8);
-            }
+            const { R, S, F, r } = c, cx = 0.5, cy = 0.5;
+            const edge = Math.min(0.5, 0.52 * c.aspect);
+            const ring = (amp, base, reach, life, thick, glow, wake, hue, delay = 0) => {
+                const p = { x: cx, y: cy, base, amp, reach, life, thick, glow, wake, hue, age: -delay, last: 0, rad: 0 };
+                S.rings.push(p);
+                if (S.rings.length > 24) S.rings.shift();
+                return p;
+            };
+            // bed: the centre breathes with the music, and is pushed back by every kick
+            const L = c.level(Math.max(R.low.level, R.mid.level)) * c.duck;
+            if (L > 0.03) dotDye(cx, cy, c.dye(L * 0.8, 0.08 * c.step, 0.5), r * (0.4 + 0.5 * L));
+            const low = c.arrive(R.low);
+            if (R.low.struck) { const hue = (S.k++ % 2) ? 0.42 : 0.58; S.kick = [ring(0, 0.03, 0.3, 0.8, 0.12, 2.2, 0.12, hue), ring(0, 0.03, 0.3, 0.8, 0.07, 2.2, 0, hue, 0.09)]; }
             if (low > 0 && S.kick) {
-                S.kick.amp += low;
-                dotDye(0.5, 0.5, c.dye(low * 1.3, 2.6, S.hue), r * (0.5 + Math.min(1.3, R.low.strength)));
-                flare[0] += low; flare[1] += 0.6 * low;
-            }
-            if (R.drop) {
-                for (let i = 0; i < 3; i++) ripple(S.ripples, 0.5, 0.5, 1.5 * c.punch / (1 + 0.5 * i), 0.75 * k, 1.0, 0.11 - 0.02 * i, 2.6, i ? 0 : 0.2, S.hue + 0.15 * i, i * 0.08);
-                dotDye(0.5, 0.5, c.dye(1.6 * c.punch, 2.6, S.hue), r * 2.0);
+                const s = Math.min(1.3, R.low.strength), beat = R.kickJitter < 0.15 ? R.kickEvery : 0.55;
+                S.kick.forEach((p, i) => {
+                    if (i === 0 || s >= 0.7) p.amp += low * [1, 0.55][i];
+                    p.reach = (0.3 + 0.55 * s / 1.3) * edge * 1.6;
+                    p.life = Math.min(1.1, Math.max(0.5, 1.3 * beat)) * (0.6 + 0.4 * s);
+                });
+                dotDye(cx, cy, c.dye(low * 1.4, 1.8, S.kick[0].hue), r * (0.4 + 0.9 * s));
+                for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; splatPush(cx + Math.cos(a) * 0.06 / c.aspect, cy + Math.sin(a) * 0.06, Math.cos(a) * F * 0.4 * low / c.aspect, Math.sin(a) * F * 0.4 * low, r * 1.5); }
             }
             if (R.snare > 0) {
                 const h = c.hit(R.snare);
-                ripple(S.ripples, 0.5, 0.5, h, 0.56 * k, 0.36, 0.045, 2.4, 0.06, S.hue + 0.5);
-                ripple(S.ripples, 0.5, 0.5, h * 0.6, 0.56 * k, 0.36, 0.04, 2.4, 0, S.hue + 0.5, 0.05);
-                for (let i = 0; i < 6; i++) flare[i] += 0.5 * h;
+                ring(h * 1.1, edge * 0.95, -edge * 0.8, 0.45, 0.06, 2.4, 0.1, 0.62);
+                ring(h * 0.5, edge * 0.95, -edge * 0.8, 0.45, 0.045, 2.4, 0, 0.62, 0.06);
             }
-            if (mid > 0) { flare[2] += 0.9 * mid; flare[3] += 0.7 * mid; }
-            if (R.high.struck) S.tick = Math.random() * 6.2832;
-            if (high > 0) {
-                dotDye(0.5 + radius(5) * Math.cos(S.tick) / c.aspect, 0.5 + radius(5) * Math.sin(S.tick), c.dye(high, 2.4, S.hue + 0.3), r * 0.12);
-                flare[5] += 0.5 * high;
+            if (R.drop) {
+                dotDye(cx, cy, c.dye(1.5 * c.punch, 2.6, 0.5), r * 4);
+                for (let i = 0; i < 4; i++) ring(1.5 * c.punch / (1 + 0.4 * i), 0.03, edge * 1.9, 1.3, 0.12 - 0.02 * i, 2.4, i ? 0 : 0.2, 0.5 + 0.04 * i, i * 0.1);
             }
-            // The rings: each band against its own range over the last few seconds. Each is drawn afresh
-            // every frame where it is now, and what it drew a frame ago is taken back (see ripple()),
-            // so it stays one crisp line however it moves, as bright as its band right now.
-            const g = 1 - Math.exp(-c.dt / 4), kept = 1 / (1 + config.DENSITY_DISSIPATION * lastStepDt);
-            for (let i = 0; i < 6; i++) {
-                const e = c.bands[i];
-                S.lo[i] = Math.min(e, S.lo[i] + (e - S.lo[i]) * g);
-                S.hi[i] = Math.max(e, S.hi[i] + (e - S.hi[i]) * g);
-                const l = e > AUDIO.BAND_THRESHOLD ? Math.pow(Math.max(0, (e - S.lo[i]) / Math.max(0.05, S.hi[i] - S.lo[i])), AUDIO.ENERGY_CURVE) : 0;
-                const v = softColor(0.15 + l * 0.85 + flare[i], c.gain * 1.3, AUDIO.COLOR_KNEE) * c.seen, rad = radius(i);
-                if (v > 0.0005) ringDye(0.5, 0.5, rad, rigColor(v, i / 5), r * 0.03, rad - S.rad[i], [S.last[i] > 0 ? -(S.last[i] / v) * kept : 0, 0, 0]);
-                S.last[i] = v > 0.0005 ? v : 0; S.rad[i] = rad;
-            }
-            runRipples(c, S.ripples);
+            if (R.mid.struck) S.note = ring(0, 0.03, edge * (0.35 + 0.3 * Math.random()), 0.45, 0.045, 1.6, 0, 0.5 + 0.12 * Math.random());
+            const mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (mid > 0 && S.note) S.note.amp += mid * 0.9;
+            if (R.high.struck) S.tick = ring(0, 0.02, edge * 0.25, 0.2, 0.035, 1.2, 0, 0.55);
+            if (high > 0 && S.tick) S.tick.amp += high * 0.7;
+            runRipples(c, S.rings);
         },
     },
 };
@@ -3903,7 +3893,7 @@ const PRESETS = {
         SHADING: true,
     },
     PULSE: {
-        _trajectory: 'PULSE',           // a loudspeaker: band rings, and a wave on every kick
+        _trajectory: 'PULSE',           // rings out on the kick, in on the snare
         _palette: { mode: 'SINGLE', singleHue: 0.55, singleRange: 0.12 }, // electric cyan
         DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 1.1,     // shockwave travels briefly, then stills
@@ -4233,8 +4223,8 @@ const STRINGS = {
         'Extra Gaussian blur layered on top of the displaced canvas. 0 = sharp glass, 2+ = thick frosted look. Mostly used by MOLTEN; great companion to all glass modes.':
             '叠加在位移后画面之上的额外高斯模糊。0 = 锐利玻璃,2+ = 厚磨砂感。主要用于熔融效果,也适合所有玻璃模式。',
 
-        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = a loudspeaker: band rings, and a wave on every kick.':
-            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。烟雾 = 鼓点点燃的烟柱。墨色 = 踩着节拍写下的笔触。彩虹 = 每个底鼓升起一道彩虹,军鼓点亮一束棱镜光。水母 = 随底鼓游动的水母。涟漪 = 落在节拍上的雨滴。漩涡 = 每个底鼓卷入一条新旋臂的星系。万花筒 = 随节拍一圈圈画出的曼陀罗。流星 = 流星雨,每个底鼓一颗流星。脉冲 = 扬声器:频段光环,每个底鼓一道冲击波。',
+        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = rings out on the kick, in on the snare.':
+            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。烟雾 = 鼓点点燃的烟柱。墨色 = 踩着节拍写下的笔触。彩虹 = 每个底鼓升起一道彩虹,军鼓点亮一束棱镜光。水母 = 随底鼓游动的水母。涟漪 = 落在节拍上的雨滴。漩涡 = 每个底鼓卷入一条新旋臂的星系。万花筒 = 随节拍一圈圈画出的曼陀罗。流星 = 流星雨,每个底鼓一颗流星。脉冲 = 底鼓向外推出圆环,军鼓向内收拢。',
         'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).':
             '低于此阈值的频段会被忽略。调高以过滤背景噪声(房间嗡嗡声、微弱的麦克风拾音)。',
         'How hard each frame pushes the fluid. Higher = more violent motion. The main "intensity" knob.':
@@ -4449,7 +4439,7 @@ const PANEL_SCHEMA = [
         items: [
             { type: 'select', label: 'Trajectory',
               options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'SMOKE', 'INK', 'RAINBOW', 'AQUA', 'BLINK', 'VORTEX', 'KALEIDO', 'COMET', 'PULSE'],
-              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = a loudspeaker: band rings, and a wave on every kick.',
+              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = rings out on the kick, in on the snare.',
               get: () => currentTrajectory, set: v => currentTrajectory = v },
             { type: 'range', label: 'Band threshold', min: 0,    max: 0.3,  step: 0.005,
               tip: 'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).',

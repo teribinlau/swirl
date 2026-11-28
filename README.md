@@ -17,8 +17,8 @@ music and the fluid responds in colour, intensity and rhythm.
   beat) · Rainbow (a rainbow on the kick, a prism on the snare) · Aqua (jellyfish
   that swim on the kick) · Blink (raindrops landing on the beat) · Vortex (a
   whirlpool that winds in a new arm on every kick) · Kaleido (a mandala drawn
-  ring by ring) · Comet (a meteor shower) · Pulse (a loudspeaker: band rings
-  and a wave on every kick)
+  ring by ring) · Comet (a meteor shower) · Pulse (rings out on the kick, in on
+  the snare)
 - **13 trajectories**: Random · Lissajous · Orbit · Sine wave · Smoke · Ink ·
   Rainbow · Aqua · Blink · Vortex · Kaleido · Comet · Pulse
 - **12 post-processing filters**: CSS (Frost, Dream, Grain, Vignette), SVG
