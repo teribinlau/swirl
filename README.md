@@ -10,15 +10,17 @@ music and the fluid responds in colour, intensity and rhythm.
 - **Microphone-driven splat injection** across 6 log-spaced frequency bands
 - **Onset detection** (spectral flux) triggers bursts on transients / beats
 - **Rhythm analysis** — a second, unsmoothed analyser tells kick, snare, notes
-  and hats apart, sizes every hit and spots the drop after a breakdown. Smoke,
-  Ink, Aqua and Blink are choreographed from those events
+  and hats apart, sizes every hit and spots the drop after a breakdown. All
+  nine modes are choreographed from those events
 - **9 mode presets** — each a complete scene (physics + trajectory + palette):
   Smoke (fog cannons fired by the drums) · Ink (brush strokes written on the
-  beat) · Rainbow (full spectrum) · Aqua (jellyfish that swim on the kick) ·
-  Blink (raindrops landing on the beat) · Vortex (whirlpool) ·
-  Kaleido (6-fold mandala) · Comet (meteor streaks) · Pulse (beat rings)
-- **12 trajectories**: Random · Lissajous · Orbit · Sine wave · Smoke · Ink ·
-  Aqua · Blink · Vortex · Kaleido · Comet · Pulse
+  beat) · Rainbow (jets of colour that collide on the kick) · Aqua (jellyfish
+  that swim on the kick) · Blink (raindrops landing on the beat) · Vortex (a
+  whirlpool that winds in a new arm on every kick) · Kaleido (a mandala drawn
+  ring by ring) · Comet (a meteor shower) · Pulse (a loudspeaker: band rings
+  and a wave on every kick)
+- **13 trajectories**: Random · Lissajous · Orbit · Sine wave · Smoke · Ink ·
+  Rainbow · Aqua · Blink · Vortex · Kaleido · Comet · Pulse
 - **12 post-processing filters**: CSS (Frost, Dream, Grain, Vignette), SVG
   displacement glass (Ripple, Pebbled, Diamond, Molten) and WebGL shader
   filters (fluted Reeded glass, true Halftone, ASCII, 1-bit Dither)

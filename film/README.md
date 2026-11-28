@@ -22,12 +22,12 @@ deterministic: re-rendering reproduces the same frames. Of the frames compared, 
 identical and one differed by a single level in a dozen pixels (checked with the pinned
 Playwright's Chromium on software GL; a hardware GPU may differ more).
 
-The video that was released shows the app as it was at commit `d4efbfd`. Smoke, Ink, Aqua and
-Blink have been reworked since, so rendering against today's `../public` gives those modes their
-new choreography under look-book settings (`K.LOOKS`) and captions that were made for the old
-one: Aqua comes out overexposed, and its caption still speaks of bubbles. Before a new release of
-the video, retune those four looks and rewrite their captions in `stage/shots/modes.js`. To get
-the released frames again, render against that build of the app:
+The video that was released shows the app as it was at commit `d4efbfd`. All nine modes have
+been reworked since, so rendering against today's `../public` gives them their new choreography
+under look-book settings (`K.LOOKS`) and captions that were made for the old ones: Aqua, for one,
+comes out overexposed, and its caption still speaks of bubbles. Before a new release of the
+video, retune the looks and rewrite the captions in `stage/shots/modes.js`. To get the released
+frames again, render against that build of the app:
 
 ```bash
 git worktree add /tmp/swirl-d4efbfd d4efbfd
