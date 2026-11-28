@@ -39,14 +39,21 @@
 
     // ---------------------------------------------------------------- soundtrack analysis
     async function loadFeatures () {
-        FILM.feat = new Uint8Array(await (await fetch('/audio/features.bin')).arrayBuffer());
+        // SHOTCFG.audio = 'audio/test/break' runs the stage on another analysed soundtrack (<prefix>.bin,
+        // <prefix>_beat.bin, <prefix>_meta.json) — for testing the app's rhythm on other music
+        const other = window.SHOTCFG && window.SHOTCFG.audio, prefix = '/' + (other || 'audio/features');
+        FILM.feat = new Uint8Array(await (await fetch(prefix + '.bin')).arrayBuffer());
         FILM.featFrames = FILM.feat.length / PER;
-        FILM.kicks = (await (await fetch('/audio/music_meta.json')).json()).kicks;      // kick drum times, seconds
+        FILM.meta = await (await fetch(other ? prefix + '_meta.json' : '/audio/music_meta.json')).json();               // where the generator put the drums
+        FILM.kicks = FILM.meta.kicks;                                                   // kick drum times, seconds
+        const beat = await fetch(prefix + '_beat.bin');                                 // the app's unsmoothed rhythm analyser
+        FILM.beat = beat.ok ? new Uint8Array(await beat.arrayBuffer()) : null;
     }
     const SILENT_T = new Uint8Array(2048).fill(128), SILENT_F = new Uint8Array(1024);
     const valid = i => i >= 0 && i < FILM.featFrames - 1;
     FILM.freqAt = i => valid(i) ? FILM.feat.subarray(i * PER, i * PER + 1024) : SILENT_F;
     FILM.timeAt = i => valid(i) ? FILM.feat.subarray(i * PER + 1024, i * PER + PER) : SILENT_T;
+    FILM.beatAt = i => valid(i) ? FILM.beat.subarray(i * 1024, i * 1024 + 1024) : SILENT_F;
 
     // ---------------------------------------------------------------- app boot
     const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -79,6 +86,10 @@
         const an = w.__audio.analyser;
         an.getByteFrequencyData = arr => arr.set(FILM.freqAt(FILM.musicFrame));
         an.getByteTimeDomainData = arr => arr.set(FILM.timeAt(FILM.musicFrame));
+        if (w.__audio.beatAnalyser) {
+            if (!FILM.beat) throw new Error('audio/features_beat.bin is missing: run `npm run audio`');
+            w.__audio.beatAnalyser.getByteFrequencyData = arr => arr.set(FILM.beatAt(FILM.musicFrame));
+        }
         FILM.resetFluid();
         // every glyph the UI can show, so no text pops in mid-shot
         const zh = w.eval('STRINGS').zh;
@@ -110,6 +121,7 @@
         const a = w.__audio;
         a.smoothedBands.fill(0); a.bands.fill(0); a.smoothedVolume = 0; a.volume = 0; a.onset = false;
         a.fluxHistory.length = 0; a.prevSpectrum.fill(0); a.lastOnsetTime = 0;
+        if (a.rhythm) a.rhythm.reset();
     };
 
     // one simulation + render step of the app, driven by soundtrack frame `musicFrame`

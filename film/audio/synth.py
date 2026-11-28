@@ -218,7 +218,7 @@ def build():
     t0 = time.time()
     drums, bassb, padb, arpb, leadb, fxb = Mix(), Mix(), Mix(), Mix(), Mix(), Mix()
     rev_send, dly_send = Mix(), Mix()
-    kick_times = []
+    kick_times, clap_times, hat_times = [], [], []
 
     kick, clap, snare = make_kick(), make_clap(), make_snare()
     chat, ohat, shaker = make_hat(0.017), make_hat(0.085, 6500.0), make_shaker()
@@ -237,15 +237,15 @@ def build():
             for beat in (1, 3):
                 t = bar_t(bar, beat * 4)
                 g = 0.27 if in_(bar, (9, 12), (37, 40)) else 0.40
-                drums.add(clap, t, g); rev_send.add(clap, t, g * 0.35)
+                drums.add(clap, t, g); rev_send.add(clap, t, g * 0.35); clap_times.append(t)
         # ---- hats
         if HATS(bar):
             for s in range(16):
                 vel = [0.55, 0.28, 0.8, 0.3][s % 4] * (0.85 + 0.3 * rng.random())
                 if OHAT(bar) and s % 4 == 2:
-                    drums.add(ohat, bar_t(bar, s), 0.21 * (0.9 + 0.2 * rng.random()), pan=0.18)
+                    drums.add(ohat, bar_t(bar, s), 0.21 * (0.9 + 0.2 * rng.random()), pan=0.18); hat_times.append(bar_t(bar, s))
                 else:
-                    drums.add(chat, bar_t(bar, s) + (0.004 if s % 2 else 0.0), 0.19 * vel, pan=0.22)
+                    drums.add(chat, bar_t(bar, s) + (0.004 if s % 2 else 0.0), 0.19 * vel, pan=0.22); hat_times.append(bar_t(bar, s))
         if SHAKER(bar):
             for s in range(16):
                 vel = [0.5, 0.75, 0.6, 1.0][s % 4]
@@ -441,15 +441,16 @@ def build():
     fade = np.clip(tt / 0.6, 0, 1) * np.clip((BARS * BAR - 0.15 - tt) / 3.6, 0, 1) ** 1.3
     music *= fade
     print('built in %.1fs; limiter: max reduction %.1f dB, active %.1f%% of the time' % (time.time() - t0, -20 * np.log10(gain.min()), 100 * np.mean(gain < 0.999)))
-    return music, stems, kick_times
+    return music, stems, (kick_times, clap_times, hat_times)
 
 MASTER_GAIN_DB = 0.6
 
 if __name__ == '__main__':
     out = sys.argv[1] if len(sys.argv) > 1 else '.'
-    music, stems, kicks = build()
+    music, stems, (kicks, claps, hats) = build()
     wavfile.write(out + '/music.wav', SR, music.T.astype(np.float32))
-    json.dump({'sr': SR, 'bpm': BPM, 'bars': BARS, 'bar': BAR, 'beat': BEAT, 'kicks': [round(k, 4) for k in kicks]}, open(out + '/music_meta.json', 'w'))
+    json.dump({'sr': SR, 'bpm': BPM, 'bars': BARS, 'bar': BAR, 'beat': BEAT, 'kicks': [round(k, 4) for k in kicks],
+               'claps': [round(k, 4) for k in claps], 'hats': [round(k, 4) for k in hats]}, open(out + '/music_meta.json', 'w'))
     def db(x): return 20 * np.log10(max(x, 1e-9))
     print('peak %.2f dBFS  rms %.2f dBFS' % (db(np.max(np.abs(music))), db(np.sqrt(np.mean(music ** 2)))))
     for name, s in stems.items():

@@ -18,8 +18,24 @@ npm run encode    # out/SWIRL-demo-1080p60.mp4 (CRF 18, ~310 MB)
 ```
 
 `npm run render` took 31 minutes on 4 cores with Chromium's software GL. Everything is
-deterministic: re-rendering reproduces the same frames, pixel for pixel (checked with the pinned
-Playwright's Chromium on software GL; a hardware GPU may differ in the last bits).
+deterministic: re-rendering reproduces the same frames. Of the frames compared, most were
+identical and one differed by a single level in a dozen pixels (checked with the pinned
+Playwright's Chromium on software GL; a hardware GPU may differ more).
+
+The video that was released shows the app as it was at commit `d4efbfd`. Smoke, Ink, Aqua and
+Blink have been reworked since, so rendering against today's `../public` gives those modes their
+new choreography under look-book settings (`K.LOOKS`) and captions that were made for the old
+one: Aqua comes out overexposed, and its caption still speaks of bubbles. Before a new release of
+the video, retune those four looks and rewrite their captions in `stage/shots/modes.js`. To get
+the released frames again, render against that build of the app:
+
+```bash
+git worktree add /tmp/swirl-d4efbfd d4efbfd
+```
+
+```bash
+SWIRL_APP=/tmp/swirl-d4efbfd/public npm run render
+```
 
 Re-render only what changed, then encode again:
 
@@ -87,6 +103,29 @@ bash tools/assemble.sh 27 out/SWIRL-demo-720p60-small.mp4 "scale=1280:720:flags=
   single-frame jumps, `tools/qrcheck.js` decodes the QR code of the end card from a frame.
 - The shots click controls by selector and label. If the app's UI changes, the shots that use those
   controls need the same change.
+
+## Measuring how a mode moves with music
+
+The same stage is the test bench for the app's rhythm: it can run any mode, exactly as shipped,
+over any analysed soundtrack, and the soundtrack generator knows where every drum hit is.
+
+- `node tools/rhythm_eval.js` runs the app's `Rhythm` analyser over the soundtrack and reports how
+  many of the kicks, claps and hats it heard, how late, and a bar-by-bar timeline.
+- `python3 tools/beatstrip.py <name> <MODE>` renders a strip of frames around a beat
+  (`out/stills/strip_<name>.png`): what the picture does in the half second after a kick.
+- `node tools/groove.js <MODE>` watches the picture the way a beat detector listens to sound and
+  prints how much new light and motion follow a kick. `--json` keeps the per-frame series.
+- `node tools/drawcost.js <MODE>` counts the draw calls and pixels a mode costs per frame.
+- `npm run check` loads the app on its own in WebGL 2, in WebGL 1 and as a phone held upright,
+  clicks through every mode and reports page errors, shaders that failed and modes that draw
+  nothing.
+- `beatstrip.py`, `groove.js` and `drawcost.js` take `--app <dir>` to run another build of the app
+  (an older checkout of `public/`) for a before / after pair.
+- Other music: `node tools/analyze.js 1 audio/test/x.wav audio/test/x` analyses any WAV into
+  `x.bin` and `x_beat.bin`. With an `x_meta.json` beside them (`{"bpm": …, "kicks": [seconds, …]}`),
+  `groove.js --audio audio/test/x`, `beatstrip.py --cfg '{"audio":"audio/test/x"}'` and
+  `rhythm_eval.js audio/test/x_beat.bin audio/test/x_meta.json` run on it. `audio/test/` is not
+  committed.
 
 ## What is staged
 

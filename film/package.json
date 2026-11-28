@@ -5,7 +5,8 @@
   "scripts": {
     "audio": "python3 audio/synth.py audio && node tools/analyze.js && python3 tools/sfx.py",
     "render": "python3 tools/render_all.py",
-    "encode": "PRESET=medium bash tools/assemble.sh 18 out/SWIRL-demo-1080p60.mp4"
+    "encode": "PRESET=medium bash tools/assemble.sh 18 out/SWIRL-demo-1080p60.mp4",
+    "check": "node tools/appcheck.js"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "5.3.0",

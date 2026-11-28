@@ -3,6 +3,8 @@ node_modules
 out/
 audio/*.wav
 audio/features.bin
+audio/features_beat.bin
 audio/features.json
 audio/music_meta.json
+audio/test/
 __pycache__/

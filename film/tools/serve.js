@@ -1,8 +1,9 @@
 // Static server for the film stage, started by the tools on a free port. /app/* is the site itself
 // (../public), so the film always renders the app as it is in this repository; everything else is
-// served from this directory.
+// served from this directory. SWIRL_APP=<dir> serves another build of the app instead.
 const http = require('http'), fs = require('fs'), path = require('path');
-const FILM = path.resolve(__dirname, '..'), APP = path.resolve(FILM, '..', 'public');
+const FILM = path.resolve(__dirname, '..');
+const APP = process.env.SWIRL_APP ? path.resolve(process.env.SWIRL_APP) : path.resolve(FILM, '..', 'public');
 const TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
     '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.woff': 'font/woff',
