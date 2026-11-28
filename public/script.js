@@ -898,6 +898,69 @@ const ringSplatShader = compileShader(gl.FRAGMENT_SHADER, `
     }
 `);
 
+// Many shapes of dye in one pass. The choreographed modes (see RIGS) draw dozens of shapes a
+// frame — a travelling ripple is drawn again on every frame of its life — and a blit for each
+// would copy the whole dye buffer every time. The same source is compiled once per kind of shape:
+//   DOT   a soft round spot                      shape = x, y, variance
+//   RING  a ripple and the lobes trailing it     shape = x, y, radius, reach   tint.a = variance      extra = gap, three lobe weights
+//   BELL  a jellyfish, seen from the side        shape = x, y, radius          tint.a = contraction   extra = up.x, up.y, tentacle sway
+// The bell is the upper half of a ring (the dome) with a faint glow inside, a soft line closing
+// it underneath (the rim) and two tentacle roots below that; contracted, it is narrower and taller.
+// A pixel a shape does not reach skips it, so a frame full of small shapes stays cheap.
+const STAMP_BATCH = Math.max(1, Math.min(8, Math.floor((gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) - 8) / 3)));
+const stampSource = `
+    precision highp float;
+    precision highp sampler2D;
+
+    varying vec2 vUv;
+    uniform sampler2D uTarget;
+    uniform float aspectRatio;
+    uniform int count;
+    uniform vec4 shape[${STAMP_BATCH}];
+    uniform vec4 tint[${STAMP_BATCH}];
+    uniform vec4 extra[${STAMP_BATCH}];
+
+    void main () {
+        vec3 sum = vec3(0.0);
+        for (int i = 0; i < ${STAMP_BATCH}; i++) {
+            if (i >= count) break;
+            vec4 s = shape[i];
+            vec2 p = vUv - s.xy;
+            p.x *= aspectRatio;
+        #ifdef DOT
+            float d2 = dot(p, p);
+            if (d2 > 12.0 * s.z) continue;
+            sum += tint[i].rgb * exp(-d2 / s.z);
+        #else
+        #ifdef RING
+            vec4 e = extra[i];
+            float v = tint[i].a;
+            float b0 = length(p) - s.z;
+            if (b0 > s.w + max(0.0, -3.0 * e.x) || b0 < -3.0 * max(0.0, e.x) - s.w) continue;     // a ring that shrinks trails outside
+            float b1 = b0 + e.x, b2 = b1 + e.x, b3 = b2 + e.x;
+            sum += tint[i].rgb * (exp(-b0 * b0 / v) + e.y * exp(-b1 * b1 / v) + e.z * exp(-b2 * b2 / v) + e.w * exp(-b3 * b3 / v));
+        #else
+            vec4 e = extra[i];
+            float squeeze = tint[i].a;
+            vec2 q = vec2(p.x * e.y - p.y * e.x, p.x * e.x + p.y * e.y) / s.z;         // across, along, in bell radii
+            if (dot(q, q) > 7.0) continue;
+            vec2 root = vec2(abs(q.x - e.z) - 0.5, q.y + 0.45);
+            q /= vec2(1.0 - 0.3 * squeeze, 1.0 + 0.3 * squeeze);
+            float d = length(q);
+            float dome = smoothstep(-0.35, 0.1, q.y);
+            float edge = exp(-(d - 1.0) * (d - 1.0) / 0.03);
+            float body = 0.3 * exp(-d * d / 0.55);
+            float rim = 0.5 * exp(-(q.y + 0.1) * (q.y + 0.1) / 0.02) * (1.0 - smoothstep(0.6, 1.15, abs(q.x)));
+            sum += tint[i].rgb * ((edge + body) * dome + rim + 0.5 * exp(-dot(root, root) / 0.05));
+        #endif
+        #endif
+        }
+        gl_FragColor = vec4(texture2D(uTarget, vUv).rgb + sum, 1.0);
+    }
+`;
+const STAMP_DOT = 0, STAMP_RING = 1, STAMP_BELL = 2;
+const stampShaders = ['DOT', 'RING', 'BELL'].map(kind => compileShader(gl.FRAGMENT_SHADER, stampSource, [kind]));
+
 const advectionShader = compileShader(gl.FRAGMENT_SHADER, `
     precision highp float;
     precision highp sampler2D;
@@ -1126,6 +1189,8 @@ const sunraysMaskProgram     = new Program(baseVertexShader, sunraysMaskShader);
 const sunraysProgram         = new Program(baseVertexShader, sunraysShader);
 const splatProgram           = new Program(baseVertexShader, splatShader);
 const ringProgram            = new Program(baseVertexShader, ringSplatShader);
+const stampPrograms          = stampShaders.map(shader => new Program(baseVertexShader, shader));
+const stampsLinked           = stampPrograms.every(p => gl.getProgramParameter(p.program, gl.LINK_STATUS));
 const advectionProgram       = new Program(baseVertexShader, advectionShader);
 const divergenceProgram      = new Program(baseVertexShader, divergenceShader);
 const curlProgram            = new Program(baseVertexShader, curlShader);
@@ -1335,6 +1400,8 @@ multipleSplats(parseInt(Math.random() * 20) + 5);
 
 let lastUpdateTime = Date.now();
 let colorUpdateTimer = 0.0;
+let rigCurl = 0;            // extra vorticity a choreographed mode asks for this frame (see RIGS); read by step()
+let lastStepDt = 0;         // the time step the dye last faded by, 0 while paused: lets a rig take back what it drew a frame ago
 update();
 
 function update () {
@@ -1344,6 +1411,7 @@ function update () {
     applyInputs();
     if (!config.PAUSED)
         step(dt);
+    lastStepDt = config.PAUSED ? 0 : dt;
     render(null);
     requestAnimationFrame(update);
 }
@@ -1388,7 +1456,7 @@ function step (dt) {
     gl.uniform2f(vorticityProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY);
     gl.uniform1i(vorticityProgram.uniforms.uVelocity, velocity.read.attach(0));
     gl.uniform1i(vorticityProgram.uniforms.uCurl, curl.attach(1));
-    gl.uniform1f(vorticityProgram.uniforms.curl, config.CURL);
+    gl.uniform1f(vorticityProgram.uniforms.curl, config.CURL + rigCurl);
     gl.uniform1f(vorticityProgram.uniforms.dt, dt);
     blit(velocity.write);
     velocity.swap();
@@ -1750,6 +1818,70 @@ function correctRadius (radius) {
     return radius;
 }
 
+// The choreographed modes (see RIGS) are built from two things: pushes that move the fluid
+// without colouring it, and stamps of dye that colour it without moving it.
+function splatPush (x, y, dx, dy, radius) {
+    splatProgram.bind();
+    gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0));
+    gl.uniform1f(splatProgram.uniforms.aspectRatio, canvas.width / canvas.height);
+    gl.uniform2f(splatProgram.uniforms.point, x, y);
+    gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0);
+    gl.uniform1f(splatProgram.uniforms.radius, correctRadius(radius / 100.0));
+    blit(velocity.write);
+    velocity.swap();
+}
+
+// Stamps wait in a queue per kind and are drawn STAMP_BATCH to a blit (see stampSource); they
+// only add, so the order they are drawn in does not matter. flushStamps() draws what is waiting.
+const stampQueues = stampPrograms.map(() => ({ shape: new Float32Array(STAMP_BATCH * 4), tint: new Float32Array(STAMP_BATCH * 4), extra: new Float32Array(STAMP_BATCH * 4), n: 0 }));
+
+function stamp (kind, x, y, size, reach, color, a, e0, e1, e2, e3) {
+    const q = stampQueues[kind], i = q.n * 4;
+    q.shape[i] = x; q.shape[i + 1] = y; q.shape[i + 2] = size; q.shape[i + 3] = reach;
+    q.tint[i] = color.r; q.tint[i + 1] = color.g; q.tint[i + 2] = color.b; q.tint[i + 3] = a;
+    q.extra[i] = e0; q.extra[i + 1] = e1; q.extra[i + 2] = e2; q.extra[i + 3] = e3;
+    if (++q.n === STAMP_BATCH) flushStamps(kind);
+}
+
+function flushStamps (kind) {
+    if (kind === undefined) { stampQueues.forEach((q, k) => flushStamps(k)); return; }
+    const q = stampQueues[kind], uniforms = stampPrograms[kind].uniforms;
+    if (q.n === 0) return;
+    stampPrograms[kind].bind();
+    gl.uniform1i(uniforms.uTarget, dye.read.attach(0));
+    gl.uniform1f(uniforms.aspectRatio, canvas.width / canvas.height);
+    gl.uniform1i(uniforms.count, q.n);
+    gl.uniform4fv(uniforms['shape[0]'], q.shape);
+    gl.uniform4fv(uniforms['tint[0]'], q.tint);
+    if (uniforms['extra[0]']) gl.uniform4fv(uniforms['extra[0]'], q.extra);
+    blit(dye.write);
+    dye.swap();
+    q.n = 0;
+}
+
+// A soft round spot of dye. radius: in SPLAT_RADIUS units, like a splat's.
+function dotDye (x, y, color, radius) {
+    stamp(STAMP_DOT, x, y, correctRadius(radius / 100.0), 0, color, 0, 0, 0, 0, 0);
+}
+
+// A ripple: a ring of dye trailed by up to three more, `gap` apart, whose weights are `lobes`
+// (trough, second crest, second trough). Drawn a little wider on every frame it really travels,
+// which the fluid cannot do for it (it is incompressible, so a ring cannot push outward all
+// round). A negative lobe is negative dye: it takes back what an earlier ring left there, so
+// the ripple stays a thin moving line instead of filling in, and where two ripples cross they
+// add and cancel like waves. ringRadius, gap: in screen heights. thickness: in SPLAT_RADIUS units.
+function ringDye (x, y, ringRadius, color, thickness, gap, lobes) {
+    const variance = correctRadius(thickness / 100.0);
+    stamp(STAMP_RING, x, y, ringRadius, 3.5 * Math.sqrt(variance), color, variance, gap, lobes[0], lobes[1], lobes[2]);
+}
+const RING_RIPPLE = [-0.92, 0, 0];
+
+// A jellyfish. radius: of the bell, in screen heights. squeeze: 0 relaxed .. 1 contracted.
+// (upX, upY): the unit vector it points along. sway: how far its tentacles hang to one side.
+function bellDye (x, y, radius, squeeze, upX, upY, sway, color) {
+    stamp(STAMP_BELL, x, y, radius, 0, color, squeeze, upX, upY, sway, 0);
+}
+
 // One raindrop ripple, rendered by the one-pass ring shader: a continuous
 // gaussian annulus of dye centred on (x, y), with a matching radial outward
 // push so the ring expands into a real concentric ripple over the following
@@ -1902,6 +2034,188 @@ function hashCode (s) {
 const BAND_EDGES_HZ = [60, 200, 500, 1500, 3000, 6000, 12000];
 const NUM_BANDS = BAND_EDGES_HZ.length - 1; // 6
 
+// ============================================================
+// RHYTHM — what the music is doing, not how loud it is.
+//
+// The six display bands above are levels on a dB scale, smoothed twice, and
+// their 70 dB window clips loud bass: a kick drum moves the sub band from
+// about 0.86 to 0.91. Anything driven by them flows like a tap, it does not
+// dance. Rhythm listens to a second, unsmoothed analyser with headroom
+// (see _initAnalyserOnce) and reports events instead:
+//
+//   low   35-110 Hz    kick drum, bass notes
+//   mid   250-2500 Hz  snare, clap, chords, voice
+//   high  5-14 kHz     hats, cymbals, air
+// (and 110-230 Hz, heard only to catch a kick's punch a frame sooner)
+//
+// For each range, every frame:
+//   struck   true on the frame a transient lands
+//   hit      how much strength arrived this frame. A hit is called on the first
+//            frame it shows, before its size is known, so the rest of it
+//            arrives over the next frame or two; the parts add up to
+//   strength the size of the current hit: 0.3 a ghost note, 1 a solid hit,
+//            1.3 an accent
+//   env      the last hit, decaying (instant attack, musical release)
+//   level    0..1 sustained loudness, relative to the range's own recent peak
+// and `snare` (with `snareEnv`): set once per mid hit that turns out to be
+// broadband, i.e. a snare or a clap rather than a note; and `drop`: true on the
+// kick that comes back after the kicks went missing for a beat or more (the
+// first bar after a breakdown, a fill, a rest) — the moment to do something big.
+//
+// A transient is measured as spectral flux in linear amplitude: how much each
+// bin rose over the last ~30 ms, summed over the range and divided by the
+// range's recent peak. So 1 means "as much new sound as this range ever gets
+// in this song" whether the source is a quiet microphone or a loud file, and
+// a faint click in a silence stays faint. The threshold follows the range's
+// own recent flux, so a busy passage does not fire on every wobble.
+// ============================================================
+const RHYTHM_RANGES = [
+    // floor: least flux that counts; cool: share of the cooldown knob; release: env / level decay (s)
+    { name: 'low',  lo: 35,   hi: 110,   floor: 0.22, cool: 0.30, release: 0.30 },
+    { name: 'mid',  lo: 250,  hi: 2500,  floor: 0.16, cool: 0.26, release: 0.20 },
+    { name: 'high', lo: 5000, hi: 14000, floor: 0.16, cool: 0.17, release: 0.10 },
+    { name: 'bass', lo: 110,  hi: 230,   floor: 0.22, cool: 0.30, release: 0.30 },   // a kick's punch, a snare's body
+];
+const RHYTHM_MIN_DB = -120, RHYTHM_MAX_DB = -10;      // the rhythm analyser's window: room for a quiet microphone, headroom for a loud file
+const RHYTHM_HISTORY = 8;                             // spectra kept, to measure a rise over ~30 ms at any frame rate
+const RHYTHM_AMP = new Float32Array(256);             // analyser byte -> linear amplitude
+for (let i = 0; i < 256; i++) RHYTHM_AMP[i] = Math.pow(10, (RHYTHM_MIN_DB + i * (RHYTHM_MAX_DB - RHYTHM_MIN_DB) / 255) / 20);
+const RHYTHM_SILENCE = RHYTHM_AMP[0];
+
+class Rhythm {
+    constructor (binHz, binCount) {
+        this.ranges = RHYTHM_RANGES.map(r => ({
+            ...r,
+            k0: Math.max(1, Math.round(r.lo / binHz)),
+            k1: Math.min(binCount - 1, Math.round(r.hi / binHz)),
+        }));
+        [this.low, this.mid, this.high, this.bass] = this.ranges;
+        this.history = [];
+        for (let i = 0; i < RHYTHM_HISTORY; i++) this.history.push(new Uint8Array(binCount));
+        this.reset();
+    }
+
+    reset () {
+        for (const r of this.ranges) {
+            r.amp = RHYTHM_SILENCE;     // mean amplitude of the range, this frame
+            r.peak = RHYTHM_SILENCE;    // its recent peak — the range's own automatic gain
+            r.flux = 0;                 // new sound this frame, relative to that peak
+            r.mean = r.floor / 2.2;     // running flux, the adaptive part of the threshold
+            r.last = -1e9;              // time of the last hit, ms
+            r.struck = false; r.hit = 0; r.strength = 0; r.env = 0; r.level = 0;
+        }
+        for (const h of this.history) h.fill(0);
+        this.head = 0;
+        this.t = -1;                    // time of the last update, ms
+        this.dt = 1 / 60;
+        this.peak = RHYTHM_SILENCE;     // loudest range lately — the overall automatic gain
+        this.loudness = 0;              // 0..1, how close the music is to its recent peak (0 in silence)
+        this.snare = 0; this.snareEnv = 0;
+        this.snareCalled = true;        // whether the current mid hit has already been judged a snare
+        this.beat = 0;                  // count of low hits: lets a mode alternate left / right, big / small
+        this.quiet = 1e9;               // seconds since the last low hit
+        this.drop = false;
+        this.kickGap = 0;               // seconds since the last solid kick (strength >= 0.85)
+        this.kickEvery = 0.5;           // their usual spacing, seconds
+        this.kickJitter = 1;            // how irregular that spacing is (0 = a metronome)
+        this.solid = -1e9;              // the last low hit already counted as a solid kick
+    }
+
+    // bytes: the rhythm analyser's frequency data. now: ms. sensitivity, cooldownMs: the onset knobs.
+    update (bytes, now, sensitivity, cooldownMs) {
+        const dt = this.t < 0 ? 1 / 60 : Math.min(0.1, Math.max(1 / 240, (now - this.t) / 1000));
+        this.t = now; this.dt = dt;
+        const lag = Math.min(RHYTHM_HISTORY - 1, Math.max(1, Math.round(0.030 / dt)));
+        const past = this.history[(this.head - lag + RHYTHM_HISTORY) % RHYTHM_HISTORY];
+        const AMP = RHYTHM_AMP;
+
+        let loudest = RHYTHM_SILENCE;
+        for (const r of this.ranges) {
+            let rise = 0, sum = 0;
+            for (let k = r.k0; k <= r.k1; k++) {
+                const a = AMP[bytes[k]], d = a - AMP[past[k]];
+                if (d > 0) rise += d;
+                sum += a;
+            }
+            const n = r.k1 - r.k0 + 1;
+            r.amp = sum / n;
+            r.rise = rise / n;
+            if (r.amp > loudest) loudest = r.amp;
+        }
+        this.history[this.head].set(bytes);
+        this.head = (this.head + 1) % RHYTHM_HISTORY;
+
+        // Automatic gain: everything is judged against the recent peak, which lets go slowly (3 dB/s).
+        // Below about -80 dB the "music" is mostly the room, so the picture dims instead of following it down.
+        this.peak = Math.max(loudest, this.peak * Math.pow(10, -3 * dt / 20), RHYTHM_SILENCE);
+        const presence = Math.min(1, Math.max(0, (20 * Math.log10(this.peak) + 98) / 18));
+        this.loudness = presence * Math.min(1, Math.max(0, 1 + 20 * Math.log10(loudest / this.peak) / 24));
+        this.quiet += dt;
+
+        const factor = 1.15 + 0.85 * sensitivity, release = Math.pow(10, -4 * dt / 20);
+        for (const r of this.ranges) {
+            // a range may turn itself up by 36 dB at most: hats far below the bass still count, hiss does not
+            r.peak = Math.max(r.amp, r.peak * release, this.peak * 0.016);
+            r.flux = r.rise / r.peak;
+            r.threshold = Math.max(r.floor, r.mean * factor);
+            // the running flux ignores the height of the spikes, or a busy bar would deafen the next one
+            r.mean += (Math.min(r.flux, r.threshold * 1.5) - r.mean) * (1 - Math.exp(-dt / 0.5));
+            const level = Math.min(1, Math.max(0, 1 + Math.log10(r.amp / r.peak))) * presence;     // 20 dB below the peak = 0
+            r.level = level > r.level ? level : r.level + (level - r.level) * (1 - Math.exp(-dt / r.release));
+            r.env *= Math.exp(-dt / r.release);
+            r.struck = false; r.hit = 0;
+        }
+        this.snareEnv *= Math.exp(-dt / 0.16);
+        this.snare = 0;
+        this.drop = false;
+        this.kickGap += dt;
+
+        const { low, mid, high, bass } = this;
+        const ATTACK = 70;                       // ms during which a hit can still grow to its real size
+        const size = flux => Math.min(1.3, Math.max(0.3, flux / 0.6)) * presence;
+        const strike = (r, flux) => {
+            if (flux <= 0 || presence <= 0) return;
+            if (now - r.last > cooldownMs * r.cool) {
+                r.last = now; r.struck = true; r.strength = r.hit = size(flux);
+            } else if (now - r.last <= ATTACK && size(flux) > r.strength) {
+                r.hit = size(flux) - r.strength; r.strength += r.hit;
+            }
+            if (r.strength > r.env && now - r.last <= ATTACK) r.env = r.strength;
+        };
+
+        // Kick: its body rises in `low`. Its punch often rises in `bass` a frame or two earlier — but so
+        // does the body of a snare, which gives itself away by rising just as much in the mid range.
+        const punch = bass.flux > bass.threshold && mid.flux < 0.6 * bass.flux ? bass.flux : 0;
+        strike(low, Math.max(low.flux > low.threshold ? low.flux : 0, punch));
+        if (low.struck) { this.beat++; this.quiet = 0; }
+        // A solid kick, counted once it has shown its size. It is the drop if the kicks had gone
+        // missing: for a steady four-on-the-floor one skipped beat is enough, for a syncopated
+        // pattern (whose rests are part of the groove) it takes a real pause.
+        if (low.strength >= 0.85 && this.solid !== low.last) {
+            this.solid = low.last;
+            const steady = this.kickJitter < 0.15;
+            this.drop = this.kickGap >= (steady ? Math.max(0.6, 1.8 * this.kickEvery) : Math.max(1.0, 2.5 * this.kickEvery));
+            if (this.kickGap < 2) {
+                this.kickJitter += (Math.abs(this.kickGap - this.kickEvery) / this.kickEvery - this.kickJitter) * 0.25;
+                this.kickEvery += (this.kickGap - this.kickEvery) * 0.25;
+            }
+            this.kickGap = 0;
+        }
+
+        // Mid: a note, a chord, a snare. Not the click on top of a kick, which is small next to its body.
+        const own = mid.flux >= 0.5 * Math.max(low.flux, bass.flux * 0.8);
+        strike(mid, mid.flux > mid.threshold && own ? mid.flux : 0);
+        if (mid.struck) this.snareCalled = false;
+        if (!this.snareCalled && now - mid.last <= ATTACK && mid.flux >= 0.45 && high.flux >= 0.3) {
+            this.snareCalled = true;
+            this.snare = Math.max(mid.strength, size(mid.flux));
+            this.snareEnv = Math.max(this.snareEnv, this.snare);
+        }
+
+        strike(high, high.flux > high.threshold ? high.flux : 0);
+    }
+}
+
 class AudioAnalyzer {
     constructor () {
         this.ready = false;
@@ -1915,6 +2229,9 @@ class AudioAnalyzer {
         this.smoothedVolume = 0;
         this.onset = false;
         this.prevSpectrum = null;
+        this.beatAnalyser = null;   // unsmoothed tap for the Rhythm analysis
+        this.beatData = null;
+        this.rhythm = null;         // Rhythm instance: hits, envelopes and levels per range
         this.fluxHistory = [];   // rolling window of recent flux values
         this.fluxHistoryMax = 43; // ~700ms at 60fps
         this.lastOnsetTime = 0;
@@ -1960,6 +2277,16 @@ class AudioAnalyzer {
         // Mixer bus: every source's gain connects here; this feeds the analyser.
         this.mixBus = this.ctx.createGain();
         this.mixBus.connect(this.analyser);
+        // Rhythm tap on the same bus: unsmoothed, with a window wide enough for a quiet
+        // microphone and a loud file alike. See the Rhythm class.
+        this.beatAnalyser = this.ctx.createAnalyser();
+        this.beatAnalyser.fftSize = 2048;
+        this.beatAnalyser.smoothingTimeConstant = 0;
+        this.beatAnalyser.minDecibels = RHYTHM_MIN_DB;
+        this.beatAnalyser.maxDecibels = RHYTHM_MAX_DB;
+        this.mixBus.connect(this.beatAnalyser);
+        this.beatData = new Uint8Array(this.beatAnalyser.frequencyBinCount);
+        this.rhythm = new Rhythm(this.ctx.sampleRate / this.beatAnalyser.fftSize, this.beatAnalyser.frequencyBinCount);
         const binCount = this.analyser.frequencyBinCount;
         this.freqData = new Uint8Array(binCount);
         this.timeData = new Uint8Array(this.analyser.fftSize);
@@ -2008,6 +2335,7 @@ class AudioAnalyzer {
             // Reset transient state so the next source doesn't inherit old flux
             this.fluxHistory.length = 0;
             if (this.prevSpectrum) this.prevSpectrum.fill(0);
+            if (this.rhythm) this.rhythm.reset();
         }
         if (this.onSourcesChanged) this.onSourcesChanged();
     }
@@ -2078,7 +2406,9 @@ class AudioAnalyzer {
             settings.sampleRate && this.ctx.sampleRate !== settings.sampleRate) {
             try { this.ctx.close(); } catch (e) {}
             this.ctx = null;
-            this.analyser = null;      // rebuild analyser + mix bus on the new context
+            this.analyser = null;      // rebuild analysers + mix bus on the new context
+            this.beatAnalyser = null;
+            this.rhythm = null;
             this.mixBus = null;
             this.bandBinRanges = [];
         }
@@ -2220,6 +2550,11 @@ class AudioAnalyzer {
         if (flux > threshold && (now - this.lastOnsetTime) > AUDIO.ONSET_COOLDOWN_MS && this.volume > 0.02) {
             this.onset = true;
             this.lastOnsetTime = now;
+        }
+
+        if (this.rhythm) {
+            this.beatAnalyser.getByteFrequencyData(this.beatData);
+            this.rhythm.update(this.beatData, now, AUDIO.ONSET_SENSITIVITY, AUDIO.ONSET_COOLDOWN_MS);
         }
     }
 }
@@ -2525,6 +2860,12 @@ function applyMaterial () {
 }
 
 function applyAudioInputs (audio) {
+    // The choreographed modes are driven by rhythm events instead of band levels. On a GPU
+    // that cannot link their shaders they fall back to the code below: most to their plain
+    // versions, SMOKE, INK and RAINBOW to the stationary anchors.
+    if (RIGS[currentTrajectory] && audio.rhythm && stampsLinked) { runRig(audio); return; }
+    rigCurl = 0;
+
     const t = performance.now() * 0.001; // seconds
     const traj = TRAJECTORY[currentTrajectory] || TRAJECTORY.RANDOM;
 
@@ -2663,6 +3004,765 @@ function audioBurst (amount, audio, gain) {
 }
 
 // ============================================================
+// RIGS — the choreographed modes.
+//
+// A rig turns Rhythm's events into gestures, and a gesture has an attack and a
+// body. The frame of the hit is the frame with the most new light and the
+// hardest push: a column of smoke stands in the air at once, a brush stroke is
+// half drawn, a ripple begins as a flash. What follows carries that motion on
+// towards the next hit. Each of the nine answers the drums in its own way:
+//
+//            kick / bass note        snare / a mid note            hats
+//   SMOKE    the centre cannon       the outer pair, a gust back   two small vents tick
+//   INK      a downstroke / short    a slash / a dot               specks
+//   RAINBOW  a bow rises             a beam through a prism / bead glints
+//   AQUA     the jellyfish pulse     they flash and turn / one     plankton sparkles
+//   BLINK    a drop at one focus     a drop at the other / small   droplets
+//   VORTEX   a new arm, a heartbeat  the core flares, a whip / a   stars
+//            at the core             knot of light
+//   KALEIDO  a ring of petals        petals folded in / beads      glitter at the rim
+//   COMET    a bright meteor         one that bursts / a faint one sparks
+//   PULSE    a ring out              a ring in / a short ring      a quick ripple
+//
+// and each keeps a quiet bed going from the sustained levels, so music without
+// drums still moves; the bed ducks under every kick, the way a mix does. With no
+// beat at all, most of them keep a slow pulse of their own. The panel's audio
+// knobs keep their meaning: Splat force scales every push, Color gain every dye,
+// Burst base the weight of the hits against the bed, Band threshold and Energy
+// curve gate and shape the bed, Sensitivity and Cooldown decide what counts as
+// a hit.
+// ============================================================
+let rigState = null;        // the active rig's memory; rebuilt whenever the trajectory changes
+
+// A colour from the active palette. v: brightness (may exceed 1); h: 0..1, where inside the
+// palette — left out, a random place, like paletteColor().
+function rigColor (v, h) {
+    if (PALETTE.mode === 'MONO') return HSVtoRGB(0, 0, v);
+    const u = h == null ? Math.random() : h;
+    const hue = PALETTE.mode === 'SINGLE' ? PALETTE.singleHue + (u - 0.5) * PALETTE.singleRange : u;
+    return HSVtoRGB(((hue % 1) + 1) % 1, 1.0, v);
+}
+
+// Evenly scattered points that never clump the way random ones do: (x, y) in [0, 1)².
+function halton (i) {
+    let x = 0, y = 0, f = 0.5, n = i + 1;
+    for (; n > 0; n = Math.floor(n / 2), f /= 2) x += f * (n % 2);
+    for (n = i + 1, f = 1 / 3; n > 0; n = Math.floor(n / 3), f /= 3) y += f * (n % 3);
+    return [x, y];
+}
+
+// A jet is a short burst from a point: a push and a puff of dye on every frame of its life,
+// strongest at the start. dx, dy and col are the amounts of its first frame at 60 fps.
+function jet (c, x, y, dx, dy, col, radius, life) {
+    c.S.jets.push({ x, y, dx, dy, col, radius, life, age: 0 });
+}
+
+function runJets (c) {
+    const jets = c.S.jets;
+    for (let i = jets.length - 1; i >= 0; i--) {
+        const j = jets[i];
+        const w = Math.pow(1 - j.age / j.life, 1.5) * c.step;
+        splatPush(j.x, j.y, j.dx * w, j.dy * w, j.radius);
+        if (j.col) dotDye(j.x, j.y, { r: j.col.r * w, g: j.col.g * w, b: j.col.b * w }, j.radius);
+        j.age += c.dt;
+        if (j.age >= j.life) jets.splice(i, 1);
+    }
+}
+
+// A stroke is a line drawn fast: its head runs from (x0, y0) to (x1, y1) in `life` seconds,
+// quickest at the start, leaving dots of dye `col` close enough to run together and pushing
+// the fluid the way it goes.
+function stroke (c, x0, y0, x1, y1, col, radius, push, life) {
+    c.S.strokes.push({ x0, y0, x1, y1, col, radius, push, life, age: 0, drawn: 0 });
+}
+
+function runStrokes (c) {
+    const strokes = c.S.strokes;
+    for (let i = strokes.length - 1; i >= 0; i--) {
+        const s = strokes[i];
+        s.age += c.dt;
+        const u = Math.min(1, s.age / s.life), p = 1 - (1 - u) * (1 - u);
+        const lx = (s.x1 - s.x0) * c.aspect, ly = s.y1 - s.y0, len = Math.hypot(lx, ly) || 1e-6;
+        const n = Math.ceil((p - s.drawn) * len / (0.5 * Math.sqrt(correctRadius(s.radius / 100))));
+        for (let k = 1; k <= n; k++) {
+            const q = s.drawn + (p - s.drawn) * k / n;
+            dotDye(s.x0 + (s.x1 - s.x0) * q, s.y0 + (s.y1 - s.y0) * q, s.col, s.radius);
+        }
+        const w = s.push * (1 - u) * c.step;
+        splatPush(s.x0 + (s.x1 - s.x0) * p, s.y0 + (s.y1 - s.y0) * p, lx / len * w, ly / len * w, s.radius * 1.5);
+        s.drawn = p;
+        if (u >= 1) strokes.splice(i, 1);
+    }
+}
+
+// A sweep is a line drawn fast along any path: its head runs along path(u), u from 0 to 1, in
+// `life` seconds, quickest at the start, leaving dots of dye `col` close enough to run together
+// and pushing the fluid the way it goes. Its `amp` scales both, so a hit that turns out bigger
+// than it first sounded can still grow it; `head` > 0 draws a brighter spot that travels with
+// the head, as bright as `head` times the line; `end` runs once the head has arrived.
+function sweep (c, path, col, radius, push, life, end, head = 0) {
+    const s = { path, col, radius, push, life, end, head, amp: 1, age: 0, drawn: 0 };
+    c.S.sweeps.push(s);
+    return s;
+}
+
+function runSweeps (c) {
+    const sweeps = c.S.sweeps;
+    for (let i = sweeps.length - 1; i >= 0; i--) {
+        const s = sweeps[i];
+        s.age += c.dt;
+        const u = Math.min(1, s.age / s.life), p = 1 - (1 - u) * (1 - u);
+        // the stretch of path the head covered this frame, in screen heights
+        let len = 0, [ax, ay] = s.path(s.drawn);
+        for (let k = 1; k <= 4; k++) {
+            const [bx, by] = s.path(s.drawn + (p - s.drawn) * k / 4);
+            len += Math.hypot((bx - ax) * c.aspect, by - ay); ax = bx; ay = by;
+        }
+        const n = Math.ceil(len / (0.5 * Math.sqrt(correctRadius(s.radius / 100))));
+        const col = { r: s.col.r * s.amp, g: s.col.g * s.amp, b: s.col.b * s.amp };
+        for (let k = 1; k <= n; k++) {
+            const [x, y] = s.path(s.drawn + (p - s.drawn) * k / n);
+            dotDye(x, y, col, s.radius);
+        }
+        const [hx, hy] = s.path(p), [tx, ty] = s.path(Math.max(0, p - 0.02));
+        if (s.head > 0) { const h = s.head * (1 - u); dotDye(hx, hy, { r: col.r * h, g: col.g * h, b: col.b * h }, s.radius * 1.4); }
+        const dx = (hx - tx) * c.aspect, dy = hy - ty, d = Math.hypot(dx, dy) || 1e-6, w = s.push * s.amp * (1 - u) * c.step;
+        splatPush(hx, hy, dx / d * w, dy / d * w, s.radius * 1.5);
+        s.drawn = p;
+        if (u >= 1) { sweeps.splice(i, 1); if (s.end) s.end(); }
+    }
+}
+
+// A ripple that really travels: each frame it is drawn at its new radius and what it drew the
+// frame before is taken back (as negative dye, less what the water lost in between), all but a
+// share `wake` that is left to glow and fade behind it. It leaves fast and slows as it spreads,
+// fading as it goes. reach: how far it gets, in screen heights (negative: it shrinks); glow: how
+// bright it may get, in shares of the panel's colour gain; delay: seconds before it sets off.
+// A ripple object with a `base` starts from that radius instead of 0.02 (the rainbow's bands).
+function ripple (list, x, y, amp, reach, life, thick, glow, wake, hue, delay = 0) {
+    const p = { x, y, amp, reach, life, thick, glow, wake, hue, age: -delay, last: 0, rad: 0 };
+    list.push(p);
+    if (list.length > 24) list.shift();
+    return p;
+}
+
+function runRipples (c, list) {
+    const kept = 1 / (1 + config.DENSITY_DISSIPATION * lastStepDt);     // what is left of last frame's dye
+    for (let i = list.length - 1; i >= 0; i--) {
+        const p = list[i];
+        p.age += c.dt;
+        if (p.age <= 0) continue;                                       // not off yet
+        const u = p.age / p.life;
+        if (u >= 1) { list.splice(i, 1); continue; }
+        const rad = (p.base == null ? 0.02 : p.base) + p.reach * (1 - Math.pow(1 - u, 2.2));
+        const v = softColor(p.amp * Math.pow(1 - u, 2.2) * 1.3, c.gain * p.glow, AUDIO.COLOR_KNEE);
+        if (v > 0.0005) ringDye(p.x, p.y, rad, rigColor(v, p.hue), c.r * p.thick, rad - p.rad, [p.last > 0 ? -(p.last / v) * (1 - p.wake) * kept : 0, 0, 0]);
+        p.last = v > 0.0005 ? v : 0; p.rad = rad;
+    }
+}
+
+function runRig (audio) {
+    const name = currentTrajectory, rig = RIGS[name], R = audio.rhythm;
+    if (!rigState || rigState.name !== name) rigState = Object.assign({ name, jets: [], strokes: [], sweeps: [] }, rig.init());
+    const gate = AUDIO.BAND_THRESHOLD, loud = R.loudness;
+    const c = {
+        R, S: rigState,
+        dt: R.dt, step: R.dt * 60,              // step: 1 at 60 fps, so per-frame amounts hold at any frame rate
+        t: performance.now() * 0.001,
+        F: AUDIO.SPLAT_FORCE * (0.5 + 0.42 * loud * AUDIO.VOLUME_GAIN),
+        gain: AUDIO.COLOR_GAIN / (1 + loud * AUDIO.VOLUME_COMPRESS),
+        punch: AUDIO.ONSET_BURST_BASE / 3 * (1 + (loud - 0.5) * AUDIO.ONSET_BURST_GAIN / 15),
+        r: config.SPLAT_RADIUS,
+        aspect: canvas.width / canvas.height,
+        // a sustained level, gated and shaped by the panel
+        level: x => Math.pow(Math.max(0, (x - gate) / (1 - gate)), AUDIO.ENERGY_CURVE),
+        // the bed makes room for the kick and swells back after it
+        duck: 1 - 0.85 * Math.min(1, R.low.env),
+    };
+    // how much of the scene shows: nothing in silence, all of it once the music is up
+    c.seen = Math.min(1, c.level(loud) * 1.6);
+    // With no beat to follow, a slow pulse of its own: the weight of a soft beat on the frame it
+    // falls, about every `period` seconds, and 0 on every other frame.
+    c.own = period => {
+        if (R.quiet < 1.5 || c.seen < 0.05) return 0;
+        if ((rigState.own -= c.dt) > 0) return 0;
+        rigState.own = period * (0.85 + 0.3 * Math.random());
+        return 0.35 + 0.3 * c.seen;
+    };
+    // the weight of a hit of this strength: accents stand out, ghost notes stay small
+    c.hit = strength => Math.pow(strength, 1.5) * c.punch;
+    // the part of a range's hit that arrives on this frame (a hit is called before its size is
+    // known, and the rest follows within a frame or two): the parts add up to hit(strength)
+    c.arrive = range => range.hit > 0 ? c.hit(range.strength) - c.hit(range.strength - range.hit) : 0;
+    // dye for an energy x: soft-clipped like every other splat, `mult` times the panel's colour gain at most
+    c.dye = (x, mult, h) => rigColor(softColor(x, c.gain * mult, AUDIO.COLOR_KNEE), h);
+    rigCurl = 0;
+    rig.frame(c);
+    runJets(c);
+    runStrokes(c);
+    runSweeps(c);
+    flushStamps();
+}
+
+const RIGS = {
+    // ---------------------------------------------------------------- SMOKE
+    // Five cannons along the floor, like the fog jets of a stage. The kick fires the big one in
+    // the middle — the column is in the air at once, as tall as the hit is hard — and rocks the
+    // room sideways, left on one beat, right on the next. The snare fires the outer pair and
+    // blows the tops back the other way; notes puff the outer cannons in turn, hats tick the
+    // inner pair.
+    SMOKE: {
+        init: () => ({ sway: 1, tick: 0, side: 0 }),
+        frame (c) {
+            const { R, S, F } = c, floor = 0.03;
+            const r = c.r * Math.pow(Math.min(1, c.aspect), 2);          // on an upright screen the cannons stand closer: thinner columns
+            // a shot of weight a: a column `tall` high and `wide` across, leaning to one side at the top
+            const shot = (x, a, tall, wide, lean) => {
+                for (let i = 0; i < 4; i++) {
+                    const u = i / 3, y = floor + tall * u;
+                    dotDye(x + lean * 0.04 * u * u, y, c.dye(a * (1.3 - 0.7 * u), 1.5), r * wide * (1 - 0.35 * u));
+                    splatPush(x, y, lean * F * 0.3 * a * u, F * 0.9 * a * (1 - 0.4 * u), r * wide * (1 - 0.3 * u));
+                }
+            };
+            // bed: a thread of smoke from each vent for as long as its range sounds
+            for (const [x, lv] of [[0.5, R.low.level], [0.2, R.mid.level], [0.8, R.mid.level], [0.35, R.high.level], [0.65, R.high.level]]) {
+                const L = c.level(lv) * c.duck;
+                if (L < 0.03) continue;
+                const wob = Math.sin(c.t * 1.7 + x * 9) * 0.008;
+                splatPush(x + wob, floor, 0, F * 0.07 * (0.5 + L) * c.step, r * 0.9);
+                dotDye(x + wob, floor, c.dye(L * 0.7, 0.12 * c.step), r * 0.8);
+            }
+            const low = c.arrive(R.low), mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (R.low.struck) S.sway = -S.sway;
+            if (low > 0) {
+                shot(0.5, low, 0.12 + 0.24 * Math.min(1.3, R.low.strength), 2.0, S.sway);
+                jet(c, 0.5, floor, S.sway * F * 0.2 * low, F * 1.0 * low, c.dye(low, 0.5), r * 1.8, 0.1);
+                splatPush(0.5, 0.55, S.sway * F * 0.5 * low, 0, c.r * 9);      // the room rocks
+            }
+            if (R.drop) {
+                // the drop: every cannon fires at once
+                for (const x of [0.2, 0.35, 0.65, 0.8]) {
+                    shot(x, 1.2 * c.punch, 0.36, 1.6, x < 0.5 ? -1 : 1);
+                    jet(c, x, floor, 0, F * 1.2 * c.punch, c.dye(1.2, 0.5), r * 1.5, 0.12);
+                }
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare);
+                for (const x of [0.2, 0.8]) {
+                    shot(x, h, 0.14 + 0.14 * Math.min(1.3, R.snare), 1.5, x < 0.5 ? 1 : -1);
+                    jet(c, x, floor, 0, F * 0.9 * h, c.dye(h, 0.4), r * 1.4, 0.08);
+                }
+                splatPush(0.5, 0.74, -S.sway * F * 0.7 * h, 0, c.r * 9);       // and the tops blow back
+            }
+            if (R.mid.struck) S.side++;
+            if (mid > 0) shot((S.side % 2) ? 0.8 : 0.2, mid * 0.6, 0.14, 1.1, 0);
+            if (R.high.struck) S.tick++;
+            if (high > 0) shot((S.tick % 2) ? 0.65 : 0.35, high * 0.6, 0.1, 0.55, 0);
+            rigCurl = 6 * c.level(R.high.level) + 8 * R.high.env;        // cymbals make the smoke curl
+        },
+    },
+
+    // ---------------------------------------------------------------- INK
+    // The music writes, in ink on wet paper. A brush travels along the top of the page at the
+    // speed of the song — eight beats from one side to the other, then back to the start —
+    // and every drum is a stroke made where the brush is: a kick a full downstroke, a bass
+    // note a short one, a note a dot, a hat a speck beside it. So the row of strokes on the
+    // page is the last bars written out, evenly spaced when the beat is steady, the newest
+    // sharp and the older ones already bleeding into the water. A snare is a slash drawn in
+    // from the side, straight across them.
+    INK: {
+        init: () => ({ pen: 0, pend: 0, wait: 0, solid: false, at: 0.5, hue: 0.5, m: 0, dab: 0.5 }),
+        frame (c) {
+            const { R, S, F, r } = c, top = 0.985;
+            let T = R.kickEvery;                                         // the beat, folded into a walking pace
+            while (T > 0.75) T /= 2;
+            while (T < 0.33) T *= 2;
+            if (c.level(R.loudness) > 0.02) S.pen = (S.pen + c.dt / ((c.aspect >= 1 ? 8 : 4) * T)) % 1;
+            const x = 0.06 + 0.88 * S.pen;
+
+            // a thread of ink runs from the brush for as long as the music sustains
+            const L = c.level(Math.max(R.mid.level, R.low.level * 0.8)) * c.duck;
+            if (L > 0.03) {
+                splatPush(x, top, 0, -F * 0.06 * L * c.step, r * 0.5);
+                dotDye(x, top, c.dye(L * 0.8, 0.3 * c.step, 0.5), r * 0.3);
+            }
+            // A low hit is a full downstroke if it is solid and a short one if it is not. It is called
+            // before its size is known, so a small one waits a moment to see whether it grows.
+            const low = c.arrive(R.low);
+            if (R.low.struck) { S.solid = false; S.pend = 0; S.wait = 0.07; S.at = x; S.hue = 0.35 + 0.3 * Math.random(); }
+            if (S.solid || S.wait > 0) {
+                S.pend += low;
+                if (!S.solid && R.low.strength >= 0.7) { S.solid = true; S.wait = 0; }
+                if (S.solid) {
+                    if (S.pend > 0) {
+                        dotDye(S.at, top - 0.035, c.dye(S.pend * 1.3, 2.0, S.hue), r * 1.2);        // the brush lands, then travels
+                        stroke(c, S.at, top, S.at + (Math.random() - 0.5) * 0.02, top - 0.2 - 0.3 * Math.min(1.3, R.low.strength), c.dye(S.pend * 1.3, 0.65, S.hue), r * 0.8, F * 1.1 * S.pend, 0.07);
+                        S.pend = 0;
+                    }
+                } else if ((S.wait -= c.dt) <= 0) {
+                    stroke(c, S.at, top, S.at, top - 0.1 - 0.12 * R.low.strength, c.dye(S.pend * 1.3, 0.6, S.hue), r * 0.35, F * 0.6 * S.pend, 0.1);
+                    S.pend = 0;
+                }
+            }
+            if (R.drop) {
+                // the drop: four more downstrokes at once, and two slashes cross the page
+                for (const dx of [0.2, 0.4, 0.6, 0.8]) {
+                    const at = 0.06 + 0.88 * ((S.pen + dx) % 1);
+                    stroke(c, at, top, at, top - 0.55, c.dye(1.4, 0.6, Math.random()), r * 0.7, F * 1.0 * c.punch, 0.14);
+                }
+                for (const side of [-1, 1]) stroke(c, 0.5 - side * 0.47, 0.5 + side * 0.14, 0.5 + side * 0.3, 0.5 - side * 0.1, c.dye(1.3, 0.75, 0.7), r * 0.8, F * 1.4 * c.punch, 0.16);
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare), left = (S.m++ % 2) === 0, y = 0.3 + 0.4 * ((S.m * 0.381966) % 1);
+                const x0 = left ? 0.03 : 0.97, x1 = x0 + (left ? 1 : -1) * (0.26 + 0.24 * Math.min(1.3, R.snare));
+                stroke(c, x0, y, x1, y + (Math.random() - 0.5) * 0.14, c.dye(h * 1.2, 0.5, 0.7), r * 0.6, F * 1.0 * h, 0.08);
+            }
+            const mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (R.mid.struck) S.dab = x;
+            if (mid > 0) {
+                dotDye(S.dab, top - 0.02, c.dye(mid, 2.2, 0.3 + 0.4 * Math.random()), r * 0.3);
+                splatPush(S.dab, top - 0.02, 0, -F * 0.5 * mid, r * 0.4);
+            }
+            if (high > 0) dotDye(x + (Math.random() - 0.5) * 0.08, top - 0.03 - 0.07 * Math.random(), c.dye(high, 2.2), r * 0.16);
+            rigCurl = 5 * R.high.env;
+        },
+    },
+
+    // ---------------------------------------------------------------- RAINBOW
+    // Light and a prism. Every kick raises a rainbow: seven bands, red outside and violet inside,
+    // that rise from below the floor as one wave and leave a glow of colour that the air carries
+    // off. The bow rises on the left on one beat and on the right on the next. A snare is a beam
+    // of white light that crosses into the picture and splits into a fan of colours where it
+    // meets the prism; a note is a bead of the next colour of the spectrum, a hat a glint. With
+    // nothing striking, colour rises from the floor in the order of the spectrum.
+    RAINBOW: {
+        init: () => ({ bows: [], side: 0, beam: 0, k: 0, hue: 0 }),
+        frame (c) {
+            const { R, S, F, r } = c, BANDS = 7;
+            const hueOf = i => 0.8 * i / (BANDS - 1);                    // red .. violet
+            const bow = (x, amp, reach, life, wake, delay = 0, flip = false) => {
+                const out = [];
+                for (let i = 0; i < BANDS; i++) {
+                    const p = { x, y: -0.18, base: 0.5 - 0.036 * i, amp, reach, life, thick: 0.06, glow: 2.0, wake, hue: hueOf(flip ? BANDS - 1 - i : i), age: -delay, last: 0, rad: 0 };
+                    S.bows.push(p); out.push(p);
+                }
+                while (S.bows.length > 4 * BANDS) S.bows.shift();
+                return out;
+            };
+            // bed: the spectrum rises from the floor for as long as the music sustains
+            const L = c.level(Math.max(R.mid.level, R.low.level * 0.8)) * c.duck;
+            if (L > 0.03) {
+                for (let i = 0; i < BANDS; i++) {
+                    const x = 0.08 + 0.84 * i / (BANDS - 1) + Math.sin(c.t * 0.9 + i * 1.3) * 0.02;
+                    splatPush(x, 0.02, 0, F * 0.04 * (0.5 + L) * c.step, r * 0.8);
+                    dotDye(x, 0.02, c.dye(L * 0.6, 0.03 * c.step, hueOf(i)), r * 0.5);
+                }
+            }
+            const low = c.arrive(R.low);
+            if (R.low.struck) { S.side = 1 - S.side; S.kick = bow(S.side ? 0.6 : 0.4, 0, 0.3, 0.8, 0.08); }
+            if (low > 0 && S.kick) {
+                const s = Math.min(1.3, R.low.strength), beat = R.kickJitter < 0.15 ? R.kickEvery : 0.55;
+                for (const p of S.kick) { p.amp += low * 0.75; p.reach = 0.12 + 0.3 * s; p.life = Math.min(1.2, Math.max(0.55, 1.4 * beat)); }
+                // the bow lifts the air with it, and the colour it leaves billows
+                for (let i = 0; i < 5; i++) {
+                    const a = Math.PI * (0.25 + 0.125 * i), x = S.kick[0].x + Math.cos(a) * 0.62 / c.aspect, y = -0.18 + Math.sin(a) * 0.62;
+                    if (y > 0) splatPush(x, y, Math.cos(a) * F * 0.2 * low, Math.sin(a) * F * 0.2 * low, r * 2.5);
+                }
+            }
+            if (R.drop) {
+                // the drop: a double rainbow, the second one wider and with its colours the other way round
+                bow(0.5, 1.4 * c.punch, 0.45, 1.4, 0.3);
+                bow(0.5, 0.8 * c.punch, 0.62, 1.6, 0.3, 0.1, true);
+            }
+            const beam = (h, left) => {
+                const y0 = 0.45 + 0.3 * ((S.beam * 0.618034) % 1), px = left ? 0.4 : 0.6, py = y0 - 0.04;
+                stroke(c, left ? -0.02 : 1.02, y0, px, py, c.dye(h * 0.8, 0.25, 0), r * 0.25, F * 0.3 * h, 0.06);
+                for (let i = 0; i < BANDS; i++) {
+                    const a = -0.32 + 0.09 * i, d = left ? 1 : -1;
+                    stroke(c, px, py, px + d * Math.cos(a) * 0.7 / c.aspect, py + Math.sin(a) * 0.7, c.dye(h, 0.22, hueOf(i)), r * 0.3, F * 0.25 * h, 0.12);
+                }
+                dotDye(px, py, c.dye(h * 1.2, 1.2, 0.15), r * 0.6);
+            };
+            if (R.snare > 0) beam(c.hit(R.snare), (S.beam++ % 2) === 0);
+            if (R.drop) { beam(1.2 * c.punch, true); beam(1.2 * c.punch, false); }
+            const mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (R.mid.struck) { const [hx, hy] = halton(S.k++); S.note = [0.08 + 0.84 * hx, 0.3 + 0.6 * hy]; S.hue = (S.hue + 1) % BANDS; }
+            if (mid > 0 && S.note) {
+                dotDye(S.note[0], S.note[1], c.dye(mid * 1.1, 1.4, hueOf(S.hue)), r * 0.35);
+                splatPush(S.note[0], S.note[1], 0, F * 0.3 * mid, r * 0.6);
+            }
+            if (high > 0) dotDye(Math.random(), 0.2 + 0.75 * Math.random(), c.dye(high, 2.2, Math.random() * 0.8), r * 0.14);
+            runRipples(c, S.bows);
+            rigCurl = 4 * R.high.env;
+        },
+    },
+
+    // ---------------------------------------------------------------- AQUA
+    // A handful of jellyfish that swim the way jellyfish do: a contraction, a glide. They all
+    // contract on the kick, so the whole swarm lifts in time and sinks back between the beats;
+    // a snare makes them flash and lean the other way; hats are plankton lighting up around
+    // them. With no beat to follow they keep their own slow pulse.
+    AQUA: {
+        init () {
+            const n = canvas.width > canvas.height ? 5 : 3, jellies = [];
+            for (let i = 0; i < n; i++) {
+                const x = 0.1 + 0.8 * (i + 0.5) / n + (Math.random() - 0.5) * 0.05, y = 0.2 + 0.4 * ((i * 0.618034 + 0.3) % 1);
+                jellies.push({
+                    x, y, homeX: x, homeY: y,                // where it rests: the beat lifts it from there, and it sinks back
+                    vx: 0, vy: 0, size: 0.85 + 0.45 * Math.random(), hue: (i + Math.random()) / n,
+                    lean: (Math.random() - 0.5) * 0.7, tilt: 0, pulse: 0, flash: 0, own: Math.random() * 1.1, sway: Math.random() * 6,
+                });
+            }
+            return { jellies, dir: 1, turn: 0, halos: [] };
+        },
+        frame (c) {
+            const { R, S, F, r } = c, seen = Math.min(1, c.level(R.loudness) * 1.6);
+            const beat = c.arrive(R.low);
+            const snare = R.snare > 0 ? c.hit(R.snare) : 0;
+            if (snare > 0) S.dir = -S.dir;
+            const note = !snare && R.mid.struck ? S.jellies[S.turn++ % S.jellies.length] : null;
+            for (const j of S.jellies) {
+                let kick = beat;
+                if (R.quiet > 0.9 && seen > 0.05) {                       // no beat: its own slow pulse
+                    j.own -= c.dt;
+                    if (j.own <= 0) { kick = 0.4 + 0.35 * seen; j.own = 1.0 + 0.5 * Math.random(); }
+                }
+                if (note === j) { kick = Math.max(kick, 0.4 * c.hit(R.mid.strength)); j.flash = Math.max(j.flash, 0.6 * R.mid.strength); }
+                const R0 = 0.07 * j.size;                                 // bell radius, in screen heights
+                const ux = Math.sin(j.tilt), uy = Math.cos(j.tilt);       // the way it points
+                if (kick > 0) {
+                    j.pulse = Math.min(1.25, j.pulse + kick);
+                    j.vy += 0.2 * kick / j.size * uy; j.vx += 0.2 * kick / j.size * ux / c.aspect;
+                    // the water it throws behind itself, which draws its tentacles out
+                    // (lit, so every stroke is a flare under the bell that stretches into the tail)
+                    splatPush(j.x - ux * R0 * 1.2 / c.aspect, j.y - uy * R0 * 1.2, -ux * F * 0.55 * kick, -uy * F * 0.55 * kick, r * 0.9 * j.size);
+                    dotDye(j.x - ux * R0 * 1.1 / c.aspect, j.y - uy * R0 * 1.1, c.dye(kick * seen, 1.6, j.hue + 0.08), r * 0.45 * j.size);
+                    // and a halo of light that leaves the bell with every solid stroke
+                    if (kick >= 0.35 && S.halos.length < 16) S.halos.push({ x: j.x, y: j.y, hue: j.hue, amp: 0.8 * Math.min(1.3, kick), reach: 0.15 * j.size, life: 0.45, age: 0 });
+                }
+                if (snare > 0) { j.flash = Math.max(j.flash, snare); j.lean = S.dir * (0.25 + 0.45 * Math.random()); }
+                j.tilt += (j.lean * 0.6 - j.tilt) * (1 - Math.exp(-c.dt / 0.35));
+                // each stroke lifts it; in between it sinks back towards the depth it lives at
+                j.vy = (j.vy - 3.0 * (j.y - j.homeY) * c.dt) * Math.exp(-c.dt / 0.36);
+                j.vx = (j.vx - 1.0 * (j.x - j.homeX) * c.dt) * Math.exp(-c.dt / 0.36);
+                j.x = Math.min(0.96, Math.max(0.04, j.x + j.vx * c.dt)); j.y = Math.min(0.94, j.y + j.vy * c.dt);
+                j.pulse *= Math.exp(-c.dt / 0.22); j.flash *= Math.exp(-c.dt / 0.25);
+                const glow = (0.2 + 1.1 * Math.min(1, j.pulse) + 0.8 * j.flash) * seen;
+                if (glow < 0.01) continue;
+                const sway = Math.sin(c.t * 2.2 + j.sway) * 0.25;
+                bellDye(j.x, j.y, R0, Math.min(1, j.pulse), ux, uy, sway, c.dye(glow, 0.32 * c.step, j.hue + 0.12 * j.flash));
+                // a snare is a flash: the whole bell at once, a shade off its own colour
+                if (snare > 0) bellDye(j.x, j.y, R0, Math.min(1, j.pulse), ux, uy, sway, c.dye(snare * seen, 1.6, j.hue + 0.15));
+            }
+            const high = c.arrive(R.high);
+            if (high > 0) dotDye(Math.random(), Math.random(), c.dye(high * 0.9, 2.0), r * 0.16);
+            if (R.drop) {
+                // the drop: the whole swarm flashes, each sends out a wide ring, the water fills with plankton
+                for (const j of S.jellies) {
+                    j.flash = Math.max(j.flash, 1.3);
+                    S.halos.push({ x: j.x, y: j.y, hue: j.hue, amp: 1.2 * c.punch, reach: 0.32, life: 0.9, age: 0 });
+                }
+                for (let i = 0; i < 14; i++) dotDye(Math.random(), Math.random(), c.dye(1.2, 2.2), r * 0.16);
+            }
+            for (let i = S.halos.length - 1; i >= 0; i--) {
+                const p = S.halos[i];
+                p.age += c.dt;
+                const u = p.age / p.life;
+                if (u >= 1) { S.halos.splice(i, 1); continue; }
+                ringDye(p.x, p.y, 0.02 + p.reach * (1 - Math.pow(1 - u, 1.7)), c.dye(p.amp * Math.pow(1 - u, 1.3) * seen, 0.8 * c.step, p.hue), r * 0.05, 0.022, RING_RIPPLE);
+            }
+        },
+    },
+
+    // ---------------------------------------------------------------- BLINK
+    // Rain on still water at night. Every hit is a drop: a flash where it lands, and a ring
+    // that leaves at speed and slows as it spreads. Kicks and bass notes land at one spot,
+    // snares at its mirror image across the centre, so two trains of rings march outward in
+    // time and cross; the pair turns slowly. A note is a small drop somewhere else, a hat a
+    // droplet.
+    // (A ring really travels: see ripple().)
+    BLINK: {
+        init: () => ({ ripples: [], k: 0, kick: [], shock: null, note: null, tick: null }),
+        frame (c) {
+            const { R, S, r } = c;
+            const ring = (x, y, amp, reach, life, thick, glow, wake, hue, delay = 0) => ripple(S.ripples, x, y, amp, reach, life, thick, glow, wake, hue, delay);
+            const flash = (x, y, a, size, hue) => dotDye(x, y, c.dye(a, 2.6, hue), r * size);
+            const th = c.t * 0.21, fx = Math.cos(th) * 0.17 / c.aspect, fy = Math.sin(th) * 0.17;
+            const low = c.arrive(R.low), mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (R.low.struck) {
+                // a drop and the two smaller waves that follow it out
+                const x = 0.5 + fx, y = 0.5 + fy, hue = Math.random();
+                S.kick = [ring(x, y, 0, 0, 1, 0.09, 2.2, 0.14, hue), ring(x, y, 0, 0, 1, 0.07, 2.2, 0, hue, 0.075), ring(x, y, 0, 0, 1, 0.06, 2.2, 0, hue, 0.15)];
+                S.shock = null;
+            }
+            if (low > 0 && S.kick.length) {
+                // the hit shows its size over a frame or two, and the ripple grows with it
+                const s = Math.min(1.3, R.low.strength), beat = R.kickJitter < 0.15 ? R.kickEvery : 0.55;
+                S.kick.forEach((p, i) => {
+                    if (i === 0 || s >= 0.7) p.amp += low * [1, 0.5, 0.25][i];          // only a solid hit is followed out
+                    p.reach = 0.2 + 0.42 * s * s;
+                    p.life = Math.min(1.1, Math.max(0.5, 1.25 * beat)) * (0.6 + 0.4 * s);
+                });
+                flash(S.kick[0].x, S.kick[0].y, low * 1.3, 0.5 + 1.7 * s, S.kick[0].hue);
+                // a solid one also throws a splash: a thin ring that is gone almost as soon as it is seen
+                if (s >= 0.7 && !S.shock) S.shock = ring(S.kick[0].x, S.kick[0].y, 0, 0.3, 0.16, 0.04, 2.6, 0, S.kick[0].hue);
+                if (S.shock) { S.shock.amp += low * 1.2; S.shock.reach = 0.22 + 0.2 * s; }
+            }
+            if (R.drop) {
+                // the drop: one swell across the whole pond, and a shower around it
+                flash(0.5, 0.5, 1.5 * c.punch, 4, 0.5);
+                for (let i = 0; i < 3; i++) ring(0.5, 0.5, 1.6 * c.punch / (1 + i), 1.0, 1.5, 0.12 - 0.02 * i, 2.4, i ? 0 : 0.2, 0.5, i * 0.09);
+                for (let i = 0; i < 8; i++) {
+                    const x = Math.random(), y = Math.random();
+                    flash(x, y, 0.9, 0.3); ring(x, y, 0.8, 0.07, 0.35, 0.04, 1.4, 0, Math.random());
+                }
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare), s = Math.min(1.3, R.snare), hue = Math.random();
+                flash(0.5 - fx, 0.5 - fy, h * 1.3, 1.5, hue);
+                ring(0.5 - fx, 0.5 - fy, h * 1.2, 0.14 + 0.22 * s, 0.5, 0.055, 2.6, 0.08, hue);
+                ring(0.5 - fx, 0.5 - fy, h * 0.5, 0.14 + 0.22 * s, 0.5, 0.045, 2.6, 0, hue, 0.06);
+            }
+            if (R.mid.struck) {
+                const [hx, hy] = halton(S.k++);
+                S.note = ring(0.1 + 0.8 * hx, 0.12 + 0.76 * hy, 0, 0.1, 0.4, 0.045, 1.4, 0, Math.random());
+            }
+            if (mid > 0 && S.note) { S.note.amp += mid * 0.9; flash(S.note.x, S.note.y, mid * 0.9, 0.4, S.note.hue); }
+            if (R.high.struck) S.tick = ring(Math.random(), Math.random(), 0, 0.035, 0.22, 0.035, 1.2, 0, Math.random());
+            if (high > 0 && S.tick) { S.tick.amp += high * 0.8; flash(S.tick.x, S.tick.y, high, 0.2, S.tick.hue); }
+            // a drizzle for music that sustains without striking
+            const calm = c.level(R.loudness) * Math.max(0, 1 - R.high.env - R.mid.env);
+            if (Math.random() < calm * 2.2 * c.dt) {
+                const x = Math.random(), y = Math.random();
+                flash(x, y, 0.5, 0.2); ring(x, y, 0.4 + 0.3 * calm, 0.07, 0.45, 0.04, 1.2, 0, Math.random());
+            }
+            runRipples(c, S.ripples);
+        },
+    },
+
+    // ---------------------------------------------------------------- VORTEX
+    // A whirlpool, or a spiral galaxy. Every kick lays a new arm from the rim to the core, makes
+    // the core beat and spins the water up; the turning water winds the arms in, so the tighter
+    // an arm is wound, the more beats ago it was laid. The arms of one bar stand a quarter turn
+    // apart. A snare makes the core flare and whips the outer water round; notes are knots of
+    // light and hats are stars, and they get wound in like everything else. The sustained sound
+    // keeps it turning.
+    VORTEX: {
+        init: () => ({ k: 0, base: Math.random() * 6.2832, arm: null, a0: 1, star: null, own: 0 }),
+        frame (c) {
+            const { R, S, F, r } = c, k = Math.min(1, c.aspect);
+            const at = (rho, th) => [0.5 + rho * k * Math.cos(th) / c.aspect, 0.5 + rho * k * Math.sin(th)];
+            // Turn the water, anticlockwise: eight pushes round a small ring. Driven at the core, the flow
+            // round it falls off the way a whirlpool's does, fast inside and slow outside, and that
+            // difference is what winds the arms into a spiral.
+            const spin = (a, rho) => {
+                for (let i = 0; i < 8; i++) {
+                    const th = i * Math.PI / 4, [x, y] = at(rho, th);
+                    splatPush(x, y, -Math.sin(th) * a, Math.cos(th) * a, r * 1.2);
+                }
+            };
+            // an arm: a spiral drawn fast from radius rho0 to near the core, winding `wind` radians on the way
+            const arm = (th0, a, hue, rho0, wind, width, life) =>
+                sweep(c, u => at(rho0 * Math.pow(0.12, u), th0 + wind * u), c.dye(a, 1.6, hue), r * width, F * 0.15 * a, life);
+            const L = c.level(Math.max(R.low.level, R.mid.level));
+            if (L > 0.03) {
+                spin(F * 0.015 * L * c.step, 0.07);
+                const [x, y] = at(0.42, c.t * 0.6);                      // dust drawn in from the rim shows the water turning
+                dotDye(x, y, c.dye(L * 0.6, 0.12 * c.step, 0.5 + 0.4 * Math.sin(c.t * 0.13)), r * 0.3);
+            }
+            const low = c.arrive(R.low), own = c.own(1.8);
+            if (R.low.struck || own) {
+                S.k++;
+                const a = R.low.struck ? c.hit(R.low.strength) : own, s = R.low.struck ? Math.min(1.3, R.low.strength) : 0.5;
+                const m = arm(S.base + S.k * Math.PI / 2, a, (S.k * 0.618034) % 1, 0.32 + 0.12 * s, 2.4, 0.11 + 0.05 * s, 0.15);
+                if (R.low.struck) { S.arm = m; S.a0 = a; } else spin(F * 0.3 * own, 0.07);
+            } else if (R.low.hit > 0 && S.arm) S.arm.amp = c.hit(R.low.strength) / S.a0;
+            if (low > 0) {
+                spin(F * 0.18 * low, 0.07);
+                dotDye(0.5, 0.5, c.dye(low * 1.2, 2.4, (S.k * 0.618034) % 1), r * (0.5 + 0.4 * Math.min(1.3, R.low.strength)));   // the core beats
+            }
+            if (R.drop) {
+                // the drop: a new galaxy, four arms at once, and the core goes off
+                for (let j = 0; j < 4; j++) arm(S.base + S.k * Math.PI / 2 + j * Math.PI / 2, 1.2 * c.punch, (j * 0.25 + 0.1) % 1, 0.46, 2.4, 0.3, 0.18);
+                dotDye(0.5, 0.5, c.dye(1.5 * c.punch, 2.4, 0.5), r * 1.2);
+                spin(F * 0.3 * c.punch, 0.07);
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare), s = Math.min(1.3, R.snare), hue = Math.random();
+                dotDye(0.5, 0.5, c.dye(h * 1.3, 2.6, hue), r * (0.6 + 0.4 * s));
+                spin(F * 0.25 * h, 0.26);                                          // and the outer water is whipped round
+            } else if (R.mid.struck) {
+                const [x, y] = at(0.1 + 0.25 * Math.random(), Math.random() * 6.2832);      // a knot of light, soon wound in
+                dotDye(x, y, c.dye(0.6 * c.hit(R.mid.strength), 1.8, Math.random()), r * 0.16);
+            }
+            const high = c.arrive(R.high);
+            if (R.high.struck) S.star = at(0.08 + 0.36 * Math.random(), Math.random() * 6.2832);
+            if (high > 0 && S.star) dotDye(S.star[0], S.star[1], c.dye(high, 2.4, Math.random()), r * 0.1);
+        },
+    },
+
+    // ---------------------------------------------------------------- KALEIDO
+    // A mandala drawn ring by ring, with the symmetry of a kaleidoscope: every mark is made
+    // twelve times, six turns and their mirror images. Each kick opens a ring of petals a step
+    // further out than the last — four kicks, four rings, from the centre to the rim — then
+    // it starts again at the centre while the old rings fade, and each ring takes the next
+    // colour. A snare folds a ring of petals inward between them; notes set beads on the
+    // spokes; hats glitter at the rim.
+    KALEIDO: {
+        init: () => ({ k: -1, n: 0, q: 0, hue: Math.random(), ripples: [], own: 0 }),
+        frame (c) {
+            const { R, S, F, r } = c, k = Math.min(1, c.aspect);
+            // every mark twelve times: at radius rho (screen heights) and angle th from the centre, turned
+            // six times and mirrored. fn(x, y, ux, uy, vx, vy): (ux, uy) points outward, (vx, vy) along
+            // the circle, away from the spoke the mirror runs along (th = 0: on the spokes, six marks).
+            const twelve = (rho, th, fn) => {
+                for (let j = 0; j < 6; j++) for (const s of th ? [1, -1] : [1]) {
+                    const a = s * th + j * Math.PI / 3, ca = Math.cos(a), sa = Math.sin(a);
+                    fn(0.5 + rho * k * ca / c.aspect, 0.5 + rho * k * sa, ca, sa, -s * sa, s * ca);
+                }
+            };
+            // a ring of petals: jets pushing out (out > 0) or in, and splaying away from the spokes (side > 0)
+            const petals = (rho, th, a, hue, out, side, width, reach = 1) => twelve(rho, th, (x, y, ux, uy, vx, vy) =>
+                jet(c, x, y, (ux * out + vx * side) * F * 0.7 * a * reach, (uy * out + vy * side) * F * 0.7 * a * reach, c.dye(a, 0.6, hue), r * width, 0.1));
+            // ring i of four, from the centre out: the further out, the further its petals reach
+            const ring = (i, a, s) => petals(0.07 + 0.1 * i, 0.12 + 0.07 * i, a, S.hue + 0.11 * i, 1, 0.45, (0.2 + 0.05 * i) * (0.8 + 0.3 * s), 0.3 + 0.24 * i);
+            // bed: a fountain at the centre, as strong as the music sustains
+            const L = c.level(Math.max(R.low.level, R.mid.level)) * c.duck;
+            if (L > 0.03) twelve(0.02, 0, (x, y, ux, uy) => {
+                splatPush(x, y, ux * F * 0.03 * L * c.step, uy * F * 0.03 * L * c.step, r * 0.5);
+                dotDye(x, y, c.dye(L * 0.6, 0.04 * c.step, S.hue + 0.5), r * 0.3);
+            });
+            const own = c.own(1.6);
+            if (R.low.struck || own) {
+                if (++S.k % 4 === 0) S.hue += 0.07;
+                ring(S.k % 4, R.low.struck ? c.hit(R.low.strength) : own, R.low.struck ? Math.min(1.3, R.low.strength) : 0.5);
+            }
+            if (R.drop) {
+                // the drop: the whole mandala at once
+                for (let i = 0; i < 4; i++) ring(i, 1.2 * c.punch, 1);
+                dotDye(0.5, 0.5, c.dye(1.5 * c.punch, 2.4, S.hue), r * 1.4);
+                ripple(S.ripples, 0.5, 0.5, 1.4 * c.punch, 0.6 * k, 0.9, 0.08, 2.4, 0.15, S.hue);
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare);
+                petals(0.33, Math.PI / 6 - 0.1, h * 0.9, S.hue + 0.5, -0.8, -0.35, 0.3);
+                dotDye(0.5, 0.5, c.dye(h, 1.8, S.hue + 0.5), r * 0.8);
+                ripple(S.ripples, 0.5, 0.5, h * 0.8, 0.42 * k, 0.45, 0.05, 2.0, 0.08, S.hue + 0.5);
+            } else if (R.mid.struck) {
+                const h = 0.6 * c.hit(R.mid.strength), rho = 0.1 + 0.28 * ((S.n++ * 0.618034) % 1);
+                twelve(rho, 0, (x, y) => dotDye(x, y, c.dye(h, 1.6, S.hue + 0.3), r * 0.2));
+            }
+            const high = c.arrive(R.high);
+            if (R.high.struck) S.q++;
+            if (high > 0) twelve(0.44, 0.04 + (S.q * 0.23) % 0.44, (x, y) => dotDye(x, y, c.dye(high, 2.2, S.hue + 0.6), r * 0.1));
+            runRipples(c, S.ripples);
+        },
+    },
+
+    // ---------------------------------------------------------------- COMET
+    // A meteor shower. Every streak flies away from one point beyond the top-left corner, the
+    // way all the meteors of a real shower seem to come from one place in the sky. A kick is a
+    // bright meteor, and each kick takes the next lane down, so a bar of kicks sweeps across
+    // the sky; a snare is a meteor that bursts at the end of its flight; notes are fainter
+    // meteors, hats short sparks. The drop is a storm, with a fireball through the middle.
+    COMET: {
+        init: () => ({ k: 0, n: 0, kick: null, a0: 1, own: 0 }),
+        frame (c) {
+            const { R, S, F, r } = c;
+            const rx = -0.12 * Math.max(1, c.aspect), ry = 1.12;       // the radiant, in screen heights from the bottom-left corner
+            const A0 = Math.atan2(0.92 - ry, c.aspect - rx), A1 = Math.atan2(0.08 - ry, 0.04 - rx);
+            // a meteor in lane f (0 = below the top-right corner .. 1 = the bottom-left), its head
+            // `start` screen heights past where the lane enters the screen; end(x, y, ux, uy) once it is over
+            const meteor = (f, a, start, len, width, life, hue, end) => {
+                const ang = A0 + (A1 - A0) * f, ux = Math.cos(ang), uy = Math.sin(ang);
+                const d0 = Math.max(-rx / ux, (ry - 1) / -uy, 0) + start, x0 = rx + ux * d0, y0 = ry + uy * d0;
+                return sweep(c, u => [(x0 + ux * len * u) / c.aspect, y0 + uy * len * u], c.dye(a, 1.0, hue), r * width, F * 0.06 * a, life,
+                             end && (() => end((x0 + ux * len) / c.aspect, y0 + uy * len)), 1.5);
+            };
+            // bed: the sky twinkles as long as there is music
+            const L = c.level(R.loudness) * c.duck;
+            if (Math.random() < L * 5 * c.dt) dotDye(Math.random(), 0.1 + 0.85 * Math.random(), c.dye(0.3 + 0.4 * L, 1.0, Math.random()), r * 0.07);
+            const own = c.own(1.5);
+            if (R.low.struck || own) {
+                const a = R.low.struck ? c.hit(R.low.strength) : own, s = R.low.struck ? Math.min(1.3, R.low.strength) : 0.5;
+                const m = meteor(0.12 + 0.25 * (S.k++ % 4), a, 0.05 + 0.15 * Math.random(), 0.35 + 0.4 * s, 0.12 + 0.06 * s, 0.2, 0.3 + 0.4 * Math.random());
+                if (R.low.struck) { S.kick = m; S.a0 = a; }
+            } else if (R.low.hit > 0 && S.kick) S.kick.amp = c.hit(R.low.strength) / S.a0;
+            if (R.drop) {
+                // the drop: a storm across every lane, and a fireball
+                for (let i = 0; i < 9; i++) meteor(i / 8, 0.9 * c.punch, 0.05 + 0.3 * Math.random(), 0.4 + 0.4 * Math.random(), 0.12, 0.22 + 0.1 * Math.random(), Math.random());
+                meteor(0.5, 1.5 * c.punch, 0.02, 1.2, 0.4, 0.35, 0.5);
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare), hue = Math.random();
+                meteor((S.n++ * 0.618034) % 1, h, 0.1 + 0.2 * Math.random(), 0.3, 0.12, 0.16, hue, (x, y) => {
+                    // it bursts: a flash, and sparks thrown out all round
+                    dotDye(x, y, c.dye(h * 1.2, 2.2, hue), r * 0.18);
+                    for (let i = 0; i < 8; i++) {
+                        const th = i * 0.7854 + Math.random() * 0.4, ux = Math.cos(th), uy = Math.sin(th), d = 0.04 + 0.05 * Math.random();
+                        dotDye(x + ux * d / c.aspect, y + uy * d, c.dye(h, 2.4, hue + 0.1), r * 0.06);
+                        splatPush(x + ux * d / c.aspect, y + uy * d, ux * F * 0.5 * h, uy * F * 0.5 * h, r * 0.25);
+                    }
+                });
+            } else if (R.mid.struck) {
+                meteor((S.n++ * 0.618034) % 1, 0.6 * c.hit(R.mid.strength), 0.1 + 0.3 * Math.random(), 0.22, 0.09, 0.15, Math.random());
+            }
+            if (R.high.struck) meteor(Math.random(), 0.5 * c.hit(R.high.strength), 0.1 + 0.5 * Math.random(), 0.07, 0.06, 0.06, Math.random());
+        },
+    },
+
+    // ---------------------------------------------------------------- PULSE
+    // A speaker cone seen from the front. The kick pushes it out: a flash at the centre and a
+    // thick ring that leaves at speed, followed by a smaller one, so the rings stand out in time
+    // with the kicks. A snare is the room answering: a ring that comes in from the edge and
+    // closes on the centre. Notes send a thin ring part of the way out, hats a quick ripple.
+    // With no beat the centre breathes with the music.
+    PULSE: {
+        init: () => ({ rings: [], k: 0 }),
+        frame (c) {
+            const { R, S, F, r } = c, cx = 0.5, cy = 0.5;
+            const edge = Math.min(0.5, 0.52 * c.aspect);
+            const ring = (amp, base, reach, life, thick, glow, wake, hue, delay = 0) => {
+                const p = { x: cx, y: cy, base, amp, reach, life, thick, glow, wake, hue, age: -delay, last: 0, rad: 0 };
+                S.rings.push(p);
+                if (S.rings.length > 24) S.rings.shift();
+                return p;
+            };
+            // bed: the centre breathes with the music, and is pushed back by every kick
+            const L = c.level(Math.max(R.low.level, R.mid.level)) * c.duck;
+            if (L > 0.03) dotDye(cx, cy, c.dye(L * 0.8, 0.08 * c.step, 0.5), r * (0.4 + 0.5 * L));
+            const low = c.arrive(R.low);
+            if (R.low.struck) { const hue = (S.k++ % 2) ? 0.42 : 0.58; S.kick = [ring(0, 0.03, 0.3, 0.8, 0.12, 2.2, 0.12, hue), ring(0, 0.03, 0.3, 0.8, 0.07, 2.2, 0, hue, 0.09)]; }
+            if (low > 0 && S.kick) {
+                const s = Math.min(1.3, R.low.strength), beat = R.kickJitter < 0.15 ? R.kickEvery : 0.55;
+                S.kick.forEach((p, i) => {
+                    if (i === 0 || s >= 0.7) p.amp += low * [1, 0.55][i];
+                    p.reach = (0.3 + 0.55 * s / 1.3) * edge * 1.6;
+                    p.life = Math.min(1.1, Math.max(0.5, 1.3 * beat)) * (0.6 + 0.4 * s);
+                });
+                dotDye(cx, cy, c.dye(low * 1.4, 1.8, S.kick[0].hue), r * (0.4 + 0.9 * s));
+                for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; splatPush(cx + Math.cos(a) * 0.06 / c.aspect, cy + Math.sin(a) * 0.06, Math.cos(a) * F * 0.4 * low / c.aspect, Math.sin(a) * F * 0.4 * low, r * 1.5); }
+            }
+            if (R.snare > 0) {
+                const h = c.hit(R.snare);
+                ring(h * 1.1, edge * 0.95, -edge * 0.8, 0.45, 0.06, 2.4, 0.1, 0.62);
+                ring(h * 0.5, edge * 0.95, -edge * 0.8, 0.45, 0.045, 2.4, 0, 0.62, 0.06);
+            }
+            if (R.drop) {
+                dotDye(cx, cy, c.dye(1.5 * c.punch, 2.6, 0.5), r * 4);
+                for (let i = 0; i < 4; i++) ring(1.5 * c.punch / (1 + 0.4 * i), 0.03, edge * 1.9, 1.3, 0.12 - 0.02 * i, 2.4, i ? 0 : 0.2, 0.5 + 0.04 * i, i * 0.1);
+            }
+            if (R.mid.struck) S.note = ring(0, 0.03, edge * (0.35 + 0.3 * Math.random()), 0.45, 0.045, 1.6, 0, 0.5 + 0.12 * Math.random());
+            const mid = c.arrive(R.mid), high = c.arrive(R.high);
+            if (mid > 0 && S.note) S.note.amp += mid * 0.9;
+            if (R.high.struck) S.tick = ring(0, 0.02, edge * 0.25, 0.2, 0.035, 1.2, 0, 0.55);
+            if (high > 0 && S.tick) S.tick.amp += high * 0.7;
+            runRipples(c, S.rings);
+        },
+    },
+};
+
+// ============================================================
 // PRESETS — each mode is a complete "scene": physics + trajectory +
 // palette together. Earlier versions only changed physics knobs while
 // every mode shared the same random trajectory and full-rainbow palette,
@@ -2673,12 +3773,12 @@ function audioBurst (amount, audio, gain) {
 
 const PRESETS = {
     SMOKE: {
-        _trajectory: 'RANDOM',
+        _trajectory: 'SMOKE',          // fog cannons fired by the drums
         _palette: { mode: 'MONO' },    // monochrome plumes — actual smoke
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.6,
+        DENSITY_DISSIPATION: 2.4,      // a column thins out over a beat or two
+        VELOCITY_DISSIPATION: 2.0,     // the room settles between shots
         PRESSURE: 0.6,
-        CURL: 1,
+        CURL: 3,
         SPLAT_RADIUS: 0.3,
         BLOOM: false,
         BLOOM_INTENSITY: 0.5,
@@ -2688,12 +3788,12 @@ const PRESETS = {
         SHADING: true,
     },
     INK: {
-        _trajectory: 'RANDOM',
+        _trajectory: 'INK',            // brush strokes written on the beat
         _palette: { mode: 'SINGLE', singleHue: 0.60, singleRange: 0.06 }, // deep indigo ink-in-water
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.05,
-        PRESSURE: 0.95,
-        CURL: 1,
+        DENSITY_DISSIPATION: 1.5,      // a stroke stays on the page for three or four beats
+        VELOCITY_DISSIPATION: 2.0,     // wet paper: a stroke bleeds and curls where it was made, it does not wander
+        PRESSURE: 0.9,
+        CURL: 2,
         SPLAT_RADIUS: 0.3,
         BLOOM: false,
         BLOOM_INTENSITY: 0.4,
@@ -2703,10 +3803,10 @@ const PRESETS = {
         SHADING: true,
     },
     RAINBOW: {
-        _trajectory: 'RANDOM',
+        _trajectory: 'RAINBOW',        // a rainbow raised by every kick, a prism lit by the snare
         _palette: { mode: 'FULL' },    // the full-spectrum showcase
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.15,
+        DENSITY_DISSIPATION: 2.8,      // the colour a bow leaves hangs in the air for a beat
+        VELOCITY_DISSIPATION: 0.8,
         PRESSURE: 0.8,
         CURL: 1,
         SPLAT_RADIUS: 0.3,
@@ -2718,25 +3818,25 @@ const PRESETS = {
         SHADING: true,
     },
     AQUA: {
-        _trajectory: 'AQUA',           // behavioural preset — forces rising-bubble trajectory
+        _trajectory: 'AQUA',           // jellyfish that swim on the kick
         _palette: { mode: 'SINGLE', singleHue: 0.5, singleRange: 0.30 },  // default aqua palette
         DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.5,     // moderate damping — bubbles slow as they rise
+        VELOCITY_DISSIPATION: 0.5,     // moderate damping — the water calms between strokes
         PRESSURE: 0.8,
         CURL: 1,
         SPLAT_RADIUS: 0.3,
-        BLOOM: false,
-        BLOOM_INTENSITY: 0.55,
-        BLOOM_THRESHOLD: 0.55,
+        BLOOM: !isMobile(),            // bioluminescence wants a glow; phones skip the cost
+        BLOOM_INTENSITY: 0.45,
+        BLOOM_THRESHOLD: 0.45,
         SUNRAYS: false,                // sunrays scramble the up-direction
         SUNRAYS_WEIGHT: 0.6,
         SHADING: true,
     },
     BLINK: {
-        _trajectory: 'BLINK',           // behavioural preset — raindrop ripples at random points
+        _trajectory: 'BLINK',           // raindrops that land on the beat
         _palette: { mode: 'MONO' },    // greyscale rings on dark surface (override per palette panel)
         DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.7,     // low damping — let the ring keep expanding outward
+        VELOCITY_DISSIPATION: 0.7,     // only matters to what a pointer stirs up: the ripples do not push
         PRESSURE: 0.85,                // mid — incompressible water-surface feel
         CURL: 1,
         SPLAT_RADIUS: 0.3,
@@ -2748,10 +3848,10 @@ const PRESETS = {
         SHADING: true,
     },
     VORTEX: {
-        _trajectory: 'VORTEX',          // one coherent whirlpool around the center
+        _trajectory: 'VORTEX',          // a galaxy that winds in a new arm on every kick
         _palette: { mode: 'SINGLE', singleHue: 0.74, singleRange: 0.22 }, // violet galaxy
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.06,    // near-frictionless — rotation accumulates
+        DENSITY_DISSIPATION: 3.2,      // an arm fades as it is wound in, by the time the next one comes
+        VELOCITY_DISSIPATION: 0.5,     // each kick spins the whirlpool up, and it slows between them
         PRESSURE: 0.85,
         CURL: 1,
         SPLAT_RADIUS: 0.3,
@@ -2763,7 +3863,7 @@ const PRESETS = {
         SHADING: true,
     },
     KALEIDO: {
-        _trajectory: 'KALEIDO',         // 6-fold mirrored mandala around the center
+        _trajectory: 'KALEIDO',         // a mandala drawn ring by ring on the beat
         _palette: { mode: 'FULL' },    // rainbow petals
         DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 0.4,
@@ -2778,7 +3878,7 @@ const PRESETS = {
         SHADING: true,
     },
     COMET: {
-        _trajectory: 'COMET',           // meteor streaks across the sky
+        _trajectory: 'COMET',           // a meteor shower, a meteor on every kick
         _palette: { mode: 'SINGLE', singleHue: 0.08, singleRange: 0.08 }, // golden-orange fire
         DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 1.3,     // push is local & transient — clean streaks, no soup
@@ -2793,7 +3893,7 @@ const PRESETS = {
         SHADING: true,
     },
     PULSE: {
-        _trajectory: 'PULSE',           // concentric beat rings from the center
+        _trajectory: 'PULSE',           // rings out on the kick, in on the snare
         _palette: { mode: 'SINGLE', singleHue: 0.55, singleRange: 0.12 }, // electric cyan
         DENSITY_DISSIPATION: 3.5,
         VELOCITY_DISSIPATION: 1.1,     // shockwave travels briefly, then stills
@@ -3023,6 +4123,9 @@ const STRINGS = {
         'LISSAJOUS': '利萨如',
         'ORBIT': '轨道',
         'SINE_WAVE': '正弦波',
+        'SMOKE': '烟雾',
+        'INK': '墨色',
+        'RAINBOW': '彩虹',
         'AQUA': '水母',
         'BLINK': '涟漪',
         'VORTEX': '漩涡',
@@ -3120,8 +4223,8 @@ const STRINGS = {
         'Extra Gaussian blur layered on top of the displaced canvas. 0 = sharp glass, 2+ = thick frosted look. Mostly used by MOLTEN; great companion to all glass modes.':
             '叠加在位移后画面之上的额外高斯模糊。0 = 锐利玻璃,2+ = 厚磨砂感。主要用于熔融效果,也适合所有玻璃模式。',
 
-        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = raindrop ripples at random points. VORTEX = one coherent whirlpool around the center. KALEIDO = 6-fold mirrored mandala. COMET = meteor streaks across the sky. PULSE = concentric beat rings from the center.':
-            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。水母 = 气泡从底部上升。涟漪 = 随机位置的雨滴涟漪。漩涡 = 围绕中心的整体涡旋。万花筒 = 六重镜像曼陀罗。流星 = 划过天际的流星。脉冲 = 从中心扩散的节拍圆环。',
+        'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = rings out on the kick, in on the snare.':
+            '喷溅遵循的路径。随机 = 固定锚点。利萨如 = 编织闭合曲线。轨道 = 同心环。正弦波 = 水平轨道。烟雾 = 鼓点点燃的烟柱。墨色 = 踩着节拍写下的笔触。彩虹 = 每个底鼓升起一道彩虹,军鼓点亮一束棱镜光。水母 = 随底鼓游动的水母。涟漪 = 落在节拍上的雨滴。漩涡 = 每个底鼓卷入一条新旋臂的星系。万花筒 = 随节拍一圈圈画出的曼陀罗。流星 = 流星雨,每个底鼓一颗流星。脉冲 = 底鼓向外推出圆环,军鼓向内收拢。',
         'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).':
             '低于此阈值的频段会被忽略。调高以过滤背景噪声(房间嗡嗡声、微弱的麦克风拾音)。',
         'How hard each frame pushes the fluid. Higher = more violent motion. The main "intensity" knob.':
@@ -3141,12 +4244,12 @@ const STRINGS = {
 
         'Spectral flux must exceed its rolling average × this to fire an onset. Lower = catches every flicker, higher = only real beats.':
             '频谱通量必须超过滚动均值 × 此值才触发起音。越低 = 捕捉每一次闪烁,越高 = 仅真正的节拍。',
-        'Minimum gap between consecutive onsets. Raise to prevent machine-gun bursts on busy music.':
-            '相邻起音之间的最小间隔。调高以防止繁忙音乐中连发爆炸。',
-        'Baseline number of splats per onset, regardless of volume.':
-            '每次起音的基础喷溅数,与音量无关。',
-        'Extra splats per onset added by volume. Big rooms get fat bursts; quiet onsets stay light.':
-            '每次起音根据音量额外增加的喷溅数。大场景获得厚重爆发,安静起音保持轻盈。',
+        'Minimum gap between consecutive onsets. Raise to prevent machine-gun bursts on busy music. The nine modes follow each drum on its own and use a fraction of this gap.':
+            '相邻起音之间的最小间隔。调高以防止繁忙音乐中连发爆炸。九个模式分别跟随每种鼓,各自只用这个间隔的一部分。',
+        'Baseline number of splats per onset, regardless of volume. In the nine modes: how big every hit is drawn.':
+            '每次起音的基础喷溅数,与音量无关。在九个模式中:每次击打画得多大。',
+        'Extra splats per onset added by volume. Big rooms get fat bursts; quiet onsets stay light. In the nine modes: how much louder passages enlarge the hits.':
+            '每次起音根据音量额外增加的喷溅数。大场景获得厚重爆发,安静起音保持轻盈。在九个模式中:响亮段落把击打放大多少。',
 
         'Freeze the simulation. Splats keep being injected but motion stops. Shortcut: P key.':
             '冻结模拟。喷溅继续注入但运动停止。快捷键:P。',
@@ -3335,8 +4438,8 @@ const PANEL_SCHEMA = [
         title: 'Audio → Fluid',
         items: [
             { type: 'select', label: 'Trajectory',
-              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'AQUA', 'BLINK', 'VORTEX', 'KALEIDO', 'COMET', 'PULSE'],
-              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. AQUA = bubbles rise from bottom. BLINK = raindrop ripples at random points. VORTEX = one coherent whirlpool around the center. KALEIDO = 6-fold mirrored mandala. COMET = meteor streaks across the sky. PULSE = concentric beat rings from the center.',
+              options: ['RANDOM', 'LISSAJOUS', 'ORBIT', 'SINE_WAVE', 'SMOKE', 'INK', 'RAINBOW', 'AQUA', 'BLINK', 'VORTEX', 'KALEIDO', 'COMET', 'PULSE'],
+              tip: 'Path that splats follow. RANDOM = stationary anchors. LISSAJOUS = woven closed curves. ORBIT = concentric rings. SINE_WAVE = horizontal lanes. SMOKE = fog cannons fired by the drums. INK = brush strokes written on the beat. RAINBOW = a rainbow raised by every kick, a prism lit by the snare. AQUA = jellyfish that swim on the kick. BLINK = raindrops that land on the beat. VORTEX = a galaxy that winds in a new arm on every kick. KALEIDO = a mandala drawn ring by ring on the beat. COMET = a meteor shower, a meteor on every kick. PULSE = rings out on the kick, in on the snare.',
               get: () => currentTrajectory, set: v => currentTrajectory = v },
             { type: 'range', label: 'Band threshold', min: 0,    max: 0.3,  step: 0.005,
               tip: 'Frequency bands quieter than this are ignored. Raise to filter background noise (room hum, faint mic pickup).',
@@ -3371,13 +4474,13 @@ const PANEL_SCHEMA = [
               tip: 'Spectral flux must exceed its rolling average × this to fire an onset. Lower = catches every flicker, higher = only real beats.',
               get: () => AUDIO.ONSET_SENSITIVITY, set: v => AUDIO.ONSET_SENSITIVITY = +v },
             { type: 'range',  label: 'Cooldown (ms)',  min: 20, max: 500, step: 5,
-              tip: 'Minimum gap between consecutive onsets. Raise to prevent machine-gun bursts on busy music.',
+              tip: 'Minimum gap between consecutive onsets. Raise to prevent machine-gun bursts on busy music. The nine modes follow each drum on its own and use a fraction of this gap.',
               get: () => AUDIO.ONSET_COOLDOWN_MS, set: v => AUDIO.ONSET_COOLDOWN_MS = +v },
             { type: 'range',  label: 'Burst base',     min: 0,  max: 20,  step: 1,
-              tip: 'Baseline number of splats per onset, regardless of volume.',
+              tip: 'Baseline number of splats per onset, regardless of volume. In the nine modes: how big every hit is drawn.',
               get: () => AUDIO.ONSET_BURST_BASE, set: v => AUDIO.ONSET_BURST_BASE = +v },
             { type: 'range',  label: 'Burst gain',     min: 0,  max: 30,  step: 0.5,
-              tip: 'Extra splats per onset added by volume. Big rooms get fat bursts; quiet onsets stay light.',
+              tip: 'Extra splats per onset added by volume. Big rooms get fat bursts; quiet onsets stay light. In the nine modes: how much louder passages enlarge the hits.',
               get: () => AUDIO.ONSET_BURST_GAIN, set: v => AUDIO.ONSET_BURST_GAIN = +v },
         ],
     },
