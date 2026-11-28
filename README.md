@@ -9,12 +9,16 @@ music and the fluid responds in colour, intensity and rhythm.
 - **Real-time fluid simulation** built on Pavel Dobryakov's WebGL fluid engine
 - **Microphone-driven splat injection** across 6 log-spaced frequency bands
 - **Onset detection** (spectral flux) triggers bursts on transients / beats
+- **Rhythm analysis** — a second, unsmoothed analyser tells kick, snare, notes
+  and hats apart, sizes every hit and spots the drop after a breakdown. Smoke,
+  Ink, Aqua and Blink are choreographed from those events
 - **9 mode presets** — each a complete scene (physics + trajectory + palette):
-  Smoke (mono plumes) · Ink (indigo wisps) · Rainbow (full spectrum) ·
-  Aqua (rising bubbles) · Blink (raindrop ripples) · Vortex (whirlpool) ·
+  Smoke (fog cannons fired by the drums) · Ink (brush strokes written on the
+  beat) · Rainbow (full spectrum) · Aqua (jellyfish that swim on the kick) ·
+  Blink (raindrops landing on the beat) · Vortex (whirlpool) ·
   Kaleido (6-fold mandala) · Comet (meteor streaks) · Pulse (beat rings)
-- **10 trajectories**: Random · Lissajous · Orbit · Sine wave · Aqua · Blink ·
-  Vortex · Kaleido · Comet · Pulse
+- **12 trajectories**: Random · Lissajous · Orbit · Sine wave · Smoke · Ink ·
+  Aqua · Blink · Vortex · Kaleido · Comet · Pulse
 - **12 post-processing filters**: CSS (Frost, Dream, Grain, Vignette), SVG
   displacement glass (Ripple, Pebbled, Diamond, Molten) and WebGL shader
   filters (fluted Reeded glass, true Halftone, ASCII, 1-bit Dither)
@@ -48,7 +52,8 @@ Then open `http://localhost:8765` and grant microphone access on first visit.
 
 - **WebGL fluid**: Forked from [PavelDoGreat/WebGL-Fluid-Simulation](https://github.com/PavelDoGreat/WebGL-Fluid-Simulation) (MIT)
 - **Audio**: Web Audio API — `AnalyserNode` with `fftSize=2048`, custom
-  spectral-flux onset detector
+  spectral-flux onset detector, and a rhythm analyser on a second analyser
+  (linear, peak-normalised flux per range: kick, snare / notes, hats)
 - **Design system**: [opencode.ai](https://opencode.ai/) terminal aesthetic
   applied via [getdesign](https://github.com/) tokens
 
@@ -62,7 +67,8 @@ Then open `http://localhost:8765` and grant microphone access on first visit.
 - `wrangler.jsonc` — Cloudflare Workers config; serves `public/` as static assets
 - `DESIGN.md` — Reference design system spec (opencode.ai)
 - `film/` — source of the demo video: renders the real app frame by frame
-  (see `film/README.md`); not deployed
+  (see `film/README.md`), which also makes it the test bench for how the modes
+  move with music; not deployed
 
 ## Licence
 
