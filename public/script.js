@@ -707,10 +707,14 @@ const filterShaderSource = `
         vec3 c = 0.25 * (texture2D(uScene, centre + q).rgb + texture2D(uScene, centre - q).rgb
                        + texture2D(uScene, centre + vec2(q.x, -q.y)).rgb + texture2D(uScene, centre + vec2(-q.x, q.y)).rgb);
         float v = brightness(c);
-        float index = floor(pow(clamp(v, 0.0, 0.999), 0.9) * glyphCount);
+        // a dark cell stays blank, so the ground stays black; the rest climb the ramp from the lightest glyph
+        float t = clamp((v - 0.07) / 0.93, 0.0, 0.999);
+        float index = v < 0.07 ? 0.0 : 1.0 + floor(pow(t, 1.6) * (glyphCount - 1.0));
         float glyph = texture2D(uGlyphs, vec2((index + cuv.x) / glyphCount, cuv.y)).r;
-        vec3 tinted = c / max(v, 0.0001) * (0.55 + 0.6 * v) + 0.1;
-        gl_FragColor = vec4(mix(CREAM, tinted, clamp(amount * 0.5, 0.0, 1.0)) * glyph, 1.0);
+        // the glyph takes the colour of its cell at full saturation, lifted so that dim cells still show their hue;
+        // the intensity knob fades it towards cream below the default (50 = all colour, 0 = cream on black)
+        vec3 tinted = c / max(v, 0.0001) * (0.6 + 0.5 * v);
+        gl_FragColor = vec4(mix(CREAM, tinted, clamp(amount, 0.0, 1.0)) * glyph, 1.0);
     #endif
 
     #ifdef DITHER
@@ -1206,7 +1210,9 @@ let shaderFilter = null;   // active SHADER_FILTERS entry — kept in sync by ap
 let sceneTarget = null;    // off-screen copy of the picture, exists only while a shader filter is on
 let glyphAtlas = null;     // ASCII glyph ramp texture, built on first use
 const linkStatus = new Map();       // WebGLProgram → did it link (see useVariant)
-const ASCII_RAMP = ' .:-=+*#%@';    // glyphs of the ASCII filter, darkest to brightest
+// glyphs of the ASCII filter: every printable character of a keyboard, put in order of how much ink
+// each one has in the UI font when the atlas is drawn (see getGlyphAtlas)
+const ASCII_RAMP = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
 
 function initFramebuffers () {
     let simRes = getResolution(config.SIM_RESOLUTION);
@@ -1624,27 +1630,36 @@ function drawFilter (filter) {
     blit(null);
 }
 
-// The ASCII filter's glyph ramp, drawn once into a texture: one 32×64 cell per
-// glyph in a single row, white on black.
+// The ASCII filter's glyph ramp, drawn once into a texture: one 20×40 cell per
+// glyph in a single row (1900 px, inside the 2048 every GPU allows), white on
+// black, sorted from the least ink to the most.
 function getGlyphAtlas () {
     if (glyphAtlas) return glyphAtlas;
 
     const texture = gl.createTexture();
-    const font = '700 52px ' + getComputedStyle(document.body).fontFamily;
+    const font = '700 32px ' + getComputedStyle(document.body).fontFamily;
     const paint = () => {
-        const cellWidth = 32, cellHeight = 64;
+        const cellWidth = 20, cellHeight = 40;
         const sheet = document.createElement('canvas');
         sheet.width = cellWidth * ASCII_RAMP.length;
         sheet.height = cellHeight;
-        const ctx = sheet.getContext('2d');
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, sheet.width, sheet.height);
-        ctx.fillStyle = '#fff';
-        ctx.font = font;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        for (let i = 0; i < ASCII_RAMP.length; i++)
-            ctx.fillText(ASCII_RAMP[i], i * cellWidth + cellWidth / 2, cellHeight / 2 + 2);
+        const ctx = sheet.getContext('2d', { willReadFrequently: true });
+        const draw = glyphs => {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, sheet.width, sheet.height);
+            ctx.fillStyle = '#fff';
+            ctx.font = font;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            for (let i = 0; i < glyphs.length; i++)
+                ctx.fillText(glyphs[i], i * cellWidth + cellWidth / 2, cellHeight / 2 + 1);
+        };
+        // measure the ink of every glyph in this font, then draw them again from the lightest to the darkest
+        draw(ASCII_RAMP);
+        const px = ctx.getImageData(0, 0, sheet.width, sheet.height).data, ink = new Array(ASCII_RAMP.length).fill(0);
+        for (let y = 0; y < cellHeight; y++)
+            for (let x = 0; x < sheet.width; x++) ink[Math.floor(x / cellWidth)] += px[(y * sheet.width + x) * 4];
+        draw([...ASCII_RAMP].map((g, i) => [g, ink[i]]).sort((a, b) => a[1] - b[1]).map(e => e[0]));
 
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -3820,11 +3835,11 @@ const PRESETS = {
     AQUA: {
         _trajectory: 'AQUA',           // jellyfish that swim on the kick
         _palette: { mode: 'SINGLE', singleHue: 0.5, singleRange: 0.30 },  // default aqua palette
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.5,     // moderate damping — the water calms between strokes
-        PRESSURE: 0.8,
+        DENSITY_DISSIPATION: 4.0,      // values set by hand in the panel (2026-11-28)
+        VELOCITY_DISSIPATION: 1.74,
+        PRESSURE: 0.39,
         CURL: 1,
-        SPLAT_RADIUS: 0.3,
+        SPLAT_RADIUS: 0.03,            // fine tentacles and plankton; the bells keep their own size
         BLOOM: !isMobile(),            // bioluminescence wants a glow; phones skip the cost
         BLOOM_INTENSITY: 0.45,
         BLOOM_THRESHOLD: 0.45,
@@ -4207,8 +4222,8 @@ const STRINGS = {
 
         'Post-processing over the fluid. CSS layer: FROST/DREAM (blur), GRAIN (film grain), VIGNETTE (dark corners). Shader: HALFTONE (print dots sized by brightness), ASCII (character grid), DITHER (1-bit pixels), REEDED (fluted glass). SVG glass displacement: RIPPLE (water), PEBBLED (small cobbles), DIAMOND (lattice/patterned), MOLTEN (large organic).':
             '流体之上的后期处理。CSS 层:磨砂/梦境(模糊)、颗粒(胶片颗粒)、暗角(边缘变暗)。着色器:半调(网点大小随亮度变化)、字符画(字符网格)、抖动(1-bit 像素)、凹槽(条纹玻璃)。SVG 玻璃位移:波纹(水)、鹅卵石(小石子)、菱形(格子/图案)、熔融(大型有机)。',
-        'Strength of the active filter. FROST/DREAM: blur radius. GRAIN: opacity. VIGNETTE: darkness. HALFTONE: dot size. ASCII/DITHER: how much image color is kept (0 = two-tone). REEDED: refraction. Other glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.':
-            '当前滤镜的强度。磨砂/梦境:模糊半径。颗粒:不透明度。暗角:暗度。半调:网点大小。字符画/抖动:保留多少画面颜色(0 = 双色)。凹槽:折射强度。其他玻璃类:像素位移幅度(主要的"深度"调节)。滤镜为"无"时不起作用。',
+        'Strength of the active filter. FROST/DREAM: blur radius. GRAIN: opacity. VIGNETTE: darkness. HALFTONE: dot size. ASCII: how much image color is kept (all of it from 50 up, 0 = two-tone). DITHER: how much image color is kept (0 = two-tone). REEDED: refraction. Other glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.':
+            '当前滤镜的强度。磨砂/梦境:模糊半径。颗粒:不透明度。暗角:暗度。半调:网点大小。字符画:保留多少画面颜色(50 及以上为全彩,0 = 双色)。抖动:保留多少画面颜色(0 = 双色)。凹槽:折射强度。其他玻璃类:像素位移幅度(主要的"深度"调节)。滤镜为"无"时不起作用。',
         'Feature size of the shader filters. HALFTONE: dot pitch. ASCII: character size. DITHER: pixel size. REEDED: flute width. Has no effect on the other filters.':
             '着色器滤镜的特征尺寸。半调:网点间距。字符画:字符大小。抖动:像素大小。凹槽:条纹宽度。对其他滤镜不起作用。',
 
@@ -4407,7 +4422,7 @@ const PANEL_SCHEMA = [
                   refreshPanel();
               } },
             { type: 'range', label: 'Filter intensity', min: 0, max: 100, step: 1,
-              tip: 'Strength of the active filter. FROST/DREAM: blur radius. GRAIN: opacity. VIGNETTE: darkness. HALFTONE: dot size. ASCII/DITHER: how much image color is kept (0 = two-tone). REEDED: refraction. Other glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.',
+              tip: 'Strength of the active filter. FROST/DREAM: blur radius. GRAIN: opacity. VIGNETTE: darkness. HALFTONE: dot size. ASCII: how much image color is kept (all of it from 50 up, 0 = two-tone). DITHER: how much image color is kept (0 = two-tone). REEDED: refraction. Other glass modes: pixel-displacement scale (the main "depth" knob). Has no effect when filter is NONE.',
               get: () => filterState.intensity, set: v => { filterState.intensity = +v; applyFilter(); } },
             { type: 'range', label: 'Filter scale', min: 0, max: 100, step: 1,
               tip: 'Feature size of the shader filters. HALFTONE: dot pitch. ASCII: character size. DITHER: pixel size. REEDED: flute width. Has no effect on the other filters.',
