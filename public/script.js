@@ -3820,11 +3820,11 @@ const PRESETS = {
     AQUA: {
         _trajectory: 'AQUA',           // jellyfish that swim on the kick
         _palette: { mode: 'SINGLE', singleHue: 0.5, singleRange: 0.30 },  // default aqua palette
-        DENSITY_DISSIPATION: 3.5,
-        VELOCITY_DISSIPATION: 0.5,     // moderate damping — the water calms between strokes
-        PRESSURE: 0.8,
+        DENSITY_DISSIPATION: 4.0,      // values set by hand in the panel (2026-11-28)
+        VELOCITY_DISSIPATION: 1.74,
+        PRESSURE: 0.39,
         CURL: 1,
-        SPLAT_RADIUS: 0.3,
+        SPLAT_RADIUS: 0.03,            // fine tentacles and plankton; the bells keep their own size
         BLOOM: !isMobile(),            // bioluminescence wants a glow; phones skip the cost
         BLOOM_INTENSITY: 0.45,
         BLOOM_THRESHOLD: 0.45,
